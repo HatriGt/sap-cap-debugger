@@ -1,0 +1,70 @@
+{
+  "name": "sap-cap-debugger",
+  "version": "1.0.0",
+  "description": "Professional NPX tool for remote debugging SAP CAP applications on Cloud Foundry (CAP v7 and earlier)",
+  "main": "dist/index.js",
+  "bin": {
+    "cds-debug": "./dist/bin/cap-debug.js",
+    "sap-cap-debugger": "./dist/bin/cap-debug.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/bin/cap-debug.js",
+    "test": "bun test",
+    "lint": "eslint src/**/*.ts",
+    "prepare": "bun run build",
+    "prepublishOnly": "bun run build && bun test"
+  },
+  "keywords": [
+    "sap",
+    "cap",
+    "cloud-application-programming",
+    "debugging",
+    "remote-debugging",
+    "cloud-foundry",
+    "btp",
+    "nodejs",
+    "debugger",
+    "npx"
+  ],
+  "author": {
+    "name": "HatriGt",
+    "email": "hatrigt@gmail.com"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HatriGt/sap-cap-debugger.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HatriGt/sap-cap-debugger/issues"
+  },
+  "homepage": "https://github.com/HatriGt/sap-cap-debugger#readme",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "commander": "^9.4.1",
+    "inquirer": "^8.2.5",
+    "execa": "^5.1.1",
+    "open": "^8.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.15.11",
+    "@types/inquirer": "^8.2.6",
+    "@typescript-eslint/eslint-plugin": "^5.59.0",
+    "@typescript-eslint/parser": "^5.59.0",
+    "eslint": "^8.38.0",
+    "typescript": "^5.0.4"
+  },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

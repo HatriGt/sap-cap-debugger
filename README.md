@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/node/v/sap-cap-debugger.svg)](https://nodejs.org/)
 
-**Version: 1.0.0**
+**Version: 1.0.1**
 
 > **NPX tool for remote debugging SAP CAP applications on Cloud Foundry (CAP v7 and earlier)**
 

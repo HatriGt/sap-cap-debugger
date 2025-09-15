@@ -1,6 +1,6 @@
 {
   "name": "sap-cap-debugger",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Professional NPX tool for remote debugging SAP CAP applications on Cloud Foundry (CAP v7 and earlier)",
   "main": "dist/index.js",
   "bin": {

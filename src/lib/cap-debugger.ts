@@ -3,6 +3,7 @@ import { PortManager } from './port-manager';
 import { SSHTunnelManager } from './ssh-tunnel';
 import { DebuggerLauncher } from './debugger-launcher';
 import { DebugConfig, DebugSession, Logger, AppStatus } from '../types';
+import * as readline from 'readline';
 
 export class CAPDebugger {
   private cfClient: CloudFoundryClient;
@@ -47,8 +48,36 @@ export class CAPDebugger {
         this.logger.success(`Application '${config.appName}' is running`);
       }
 
-      // Enable SSH access
-      await this.cfClient.enableSSH(config.appName);
+      // Check and enable SSH access
+      const sshEnabled = await this.cfClient.checkSSHEnabled(config.appName);
+      if (!sshEnabled) {
+        this.logger.info('SSH access is required for remote debugging');
+        this.logger.info('This will enable SSH access and restart your application');
+        
+        // Ask user for confirmation
+        const { confirm } = await this.askForConfirmation('Do you want to enable SSH and restart the app? (y/N): ');
+        if (!confirm) {
+          this.logger.error('SSH access is required. Exiting...');
+          return false;
+        }
+        
+        // Enable SSH
+        if (!await this.cfClient.enableSSH(config.appName)) {
+          this.logger.error('Failed to enable SSH access');
+          return false;
+        }
+        
+        // Restart the app to apply SSH changes
+        this.logger.info('Restarting application to apply SSH changes...');
+        if (!await this.cfClient.startApp(config.appName)) {
+          this.logger.error('Failed to restart application after enabling SSH');
+          return false;
+        }
+        
+        // Wait for app to be ready
+        this.logger.info('Waiting for application to be ready...');
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
 
       // Cleanup any existing debugging session
       await this.cleanup();
@@ -186,5 +215,20 @@ export class CAPDebugger {
     console.log('⚠️  IMPORTANT: Keep this terminal open! The debugging session will continue running.');
     console.log('   The processes will keep running until you run cleanup');
     console.log('');
+  }
+
+  private async askForConfirmation(question: string): Promise<{ confirm: boolean }> {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+
+    return new Promise((resolve) => {
+      rl.question(question, (answer) => {
+        rl.close();
+        const confirm = answer.toLowerCase().trim() === 'y' || answer.toLowerCase().trim() === 'yes';
+        resolve({ confirm });
+      });
+    });
   }
 }

@@ -92,12 +92,59 @@ export class CloudFoundryClient {
     }
   }
 
+  async checkSSHEnabled(appName: string): Promise<boolean> {
+    this.logger.info(`Checking SSH access for application: ${appName}`);
+    
+    const result = await this.commandExecutor.execute('cf', ['ssh-enabled', appName]);
+    
+    if (result.success) {
+      const output = result.output.toLowerCase();
+      if (output.includes('ssh is enabled')) {
+        this.logger.success('SSH access is already enabled');
+        return true;
+      } else if (output.includes('ssh is disabled')) {
+        this.logger.info('SSH access is disabled');
+        return false;
+      }
+    }
+    
+    // If we can't determine status, assume it's disabled
+    this.logger.warning('Could not determine SSH status, assuming disabled');
+    return false;
+  }
+
   async startAppProcess(appName: string): Promise<CommandResult> {
     this.logger.info('Starting application process...');
     
-    const command = `export PATH='/home/vcap/deps/0/bin:$PATH' && cd /home/vcap/app && /home/vcap/deps/0/bin/node srv/server.js`;
+    // First, try to detect the correct entry point
+    const entryPoint = await this.detectEntryPoint(appName);
+    const command = `export PATH='/home/vcap/deps/0/bin:$PATH' && cd /home/vcap/app && /home/vcap/deps/0/bin/node ${entryPoint}`;
     
     return await this.commandExecutor.execute('cf', ['ssh', appName, '-c', command]);
+  }
+
+  async detectEntryPoint(appName: string): Promise<string> {
+    this.logger.info('Detecting application entry point...');
+    
+    // Check common CAP entry points in order of preference
+    const possibleEntryPoints = [
+      'server.js',           // Most common for CAP apps
+      'srv/server.js',       // Standard CAP structure
+      'app/server.js',       // Alternative structure
+      'index.js'             // Fallback
+    ];
+
+    for (const entryPoint of possibleEntryPoints) {
+      const result = await this.commandExecutor.execute('cf', ['ssh', appName, '-c', `test -f /home/vcap/app/${entryPoint} && echo "exists"`]);
+      if (result.success && result.output.trim() === 'exists') {
+        this.logger.success(`Found entry point: ${entryPoint}`);
+        return entryPoint;
+      }
+    }
+
+    // If no entry point found, default to server.js and let it fail with a clear error
+    this.logger.warning('Could not detect entry point, defaulting to server.js');
+    return 'server.js';
   }
 
   async findNodeProcess(appName: string): Promise<ProcessInfo | null> {

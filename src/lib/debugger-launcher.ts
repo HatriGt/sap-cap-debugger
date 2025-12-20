@@ -1,6 +1,11 @@
 import open = require('open');
 import { CommandExecutor } from '../utils/command';
 import { Logger, DebuggerType } from '../types';
+import * as http from 'http';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 export class DebuggerLauncher {
   private commandExecutor: CommandExecutor;
@@ -11,6 +16,46 @@ export class DebuggerLauncher {
     this.commandExecutor = new CommandExecutor(logger);
   }
 
+  private async fetchInspectorUrl(port: number): Promise<string | null> {
+    return new Promise((resolve) => {
+      const req = http.get(`http://localhost:${port}/json`, (res) => {
+        let data = '';
+        
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        
+        res.on('end', () => {
+          try {
+            const targets = JSON.parse(data);
+            if (Array.isArray(targets) && targets.length > 0) {
+              // Get the first target's devtoolsFrontendUrl
+              const target = targets[0];
+              if (target.devtoolsFrontendUrl) {
+                resolve(target.devtoolsFrontendUrl);
+                return;
+              }
+            }
+            resolve(null);
+          } catch (error) {
+            this.logger.debug(`Failed to parse inspector JSON: ${error}`);
+            resolve(null);
+          }
+        });
+      });
+      
+      req.on('error', (error) => {
+        this.logger.debug(`Failed to fetch inspector URL: ${error.message}`);
+        resolve(null);
+      });
+      
+      req.setTimeout(5000, () => {
+        req.destroy();
+        resolve(null);
+      });
+    });
+  }
+
   async launchChromeDebugger(port: number): Promise<void> {
     this.logger.step('Opening Chrome Debugger');
     
@@ -18,8 +63,69 @@ export class DebuggerLauncher {
     await new Promise(resolve => setTimeout(resolve, 3000));
     
     try {
-      await open('chrome://inspect/#devices');
-      this.logger.success('Chrome debugger opened');
+      // Try to fetch the devtoolsFrontendUrl from the inspector JSON endpoint
+      this.logger.loading('Fetching inspector URL...');
+      const inspectorUrl = await this.fetchInspectorUrl(port);
+      this.logger.stopLoading();
+      
+      if (inspectorUrl) {
+        // The devtoolsFrontendUrl format is: devtools://devtools/bundled/...
+        // On macOS, we need to use the 'open' command with Chrome directly
+        this.logger.info(`Opening DevTools for port ${port}...`);
+        this.logger.debug(`Inspector URL: ${inspectorUrl}`);
+        
+        const isMac = process.platform === 'darwin';
+        
+        if (isMac) {
+          // On macOS, use the 'open' command with Chrome to handle devtools:// protocol
+          try {
+            await execAsync(`open -a "Google Chrome" "${inspectorUrl}"`);
+            this.logger.success('Chrome DevTools opened directly!');
+            console.log('');
+            this.logger.info('🎉 DevTools should now be open with your debugging session');
+            console.log('');
+            return;
+          } catch (error: any) {
+            this.logger.warning(`Could not open with Chrome app: ${error.message}`);
+            this.logger.warning('Trying alternative method...');
+            // Fallback: open the JSON page
+            await open(`http://localhost:${port}/json`);
+            this.logger.info(`Opened http://localhost:${port}/json`);
+            this.logger.info('Please click on the "devtoolsFrontendUrl" link to open DevTools');
+            console.log('');
+            return;
+          }
+        } else {
+          // On other platforms, try the open package
+          try {
+            await open(inspectorUrl, { app: { name: 'google chrome' } });
+            this.logger.success('Chrome DevTools opened directly!');
+            console.log('');
+            this.logger.info('🎉 DevTools should now be open with your debugging session');
+            console.log('');
+            return;
+          } catch (openError) {
+            // If that doesn't work, open the JSON page so user can click the link
+            this.logger.warning('Could not open DevTools URL directly, opening JSON page instead...');
+            await open(`http://localhost:${port}/json`);
+            this.logger.info(`Opened http://localhost:${port}/json`);
+            this.logger.info('Please click on the "devtoolsFrontendUrl" link to open DevTools');
+            console.log('');
+            return;
+          }
+        }
+      }
+      
+      // Fallback to chrome://inspect if we can't fetch the URL
+      this.logger.warning('Could not fetch inspector URL, opening chrome://inspect instead');
+      try {
+        await open('chrome://inspect/#devices', { app: { name: 'google chrome' } });
+        this.logger.success('Chrome debugger opened');
+      } catch (chromeError) {
+        // If that fails, try without specifying the app
+        await open('chrome://inspect/#devices');
+        this.logger.success('Chrome debugger opened');
+      }
       
       this.logger.info('🔍 Chrome Debugger Instructions:');
       console.log('1. Chrome should now be open at chrome://inspect/#devices');
@@ -27,13 +133,13 @@ export class DebuggerLauncher {
       console.log('3. Click the \'inspect\' link next to your process');
       console.log('4. This will open the Node.js DevTools for debugging');
       console.log('');
-      this.logger.info('💡 Tip: You can also click \'Open dedicated DevTools for Node\' for a better experience');
+      console.log(`💡 Alternative: Open http://localhost:${port}/json and click the devtoolsFrontendUrl link`);
       console.log('');
     } catch (error) {
-      this.logger.warning('Chrome not found. Please open Chrome manually and:');
-      console.log('1. Go to chrome://inspect/#devices');
-      console.log(`2. Look for your Node.js process (should show 'localhost:${port}')`);
-      console.log('3. Click \'inspect\' to start debugging');
+      this.logger.warning('Failed to open Chrome. Please open Chrome manually and:');
+      console.log(`1. Go to http://localhost:${port}/json`);
+      console.log('2. Copy the devtoolsFrontendUrl and open it in Chrome');
+      console.log('3. Or go to chrome://inspect/#devices and configure manually');
     }
   }
 

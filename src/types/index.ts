@@ -46,4 +46,7 @@ export interface Logger {
   error: (message: string) => void;
   step: (message: string) => void;
   debug: (message: string) => void;
+  loading: (message: string) => void;
+  stopLoading: () => void;
+  update: (message: string) => void;
 }

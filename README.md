@@ -5,15 +5,16 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/node/v/sap-cap-debugger.svg)](https://nodejs.org/)
 
+> Professional NPX tool for remote debugging SAP CAP applications on Cloud Foundry
 
-> **NPX tool for remote debugging SAP CAP applications on Cloud Foundry (CAP v7 and earlier)**
+A production-ready solution for debugging SAP Cloud Application Programming (CAP) applications deployed on SAP Business Technology Platform (BTP) Cloud Foundry. This tool simplifies remote debugging setup with automatic port assignment, multi-app support, and direct DevTools integration.
 
-A comprehensive, production-ready solution for debugging SAP Cloud Application Programming (CAP) applications deployed on SAP Business Technology Platform (BTP) Cloud Foundry. This tool provides an easy-to-use NPX command that handles all the complexity of setting up remote debugging for CAP applications where the built-in `cds debug` command is not available.
+> **💡 Command Names**: You can use either `npx sap-cap-debugger` or `cds-debug` (if installed globally). Both commands work identically throughout this documentation.
 
 ## 🚀 Quick Start
 
 ```bash
-# Install and run in one command
+# Debug an application (interactive selection if no name provided)
 npx sap-cap-debugger my-cap-app
 
 # Or install globally
@@ -23,13 +24,14 @@ cds-debug my-cap-app
 
 ## ✨ Features
 
-- **🎯 One-Command Setup**: Complete remote debugging setup with a single command
-- **🔧 Multiple Debuggers**: Support for Chrome DevTools, VS Code, or both
-- **📱 Interactive Mode**: Interactive app selection when no app name is provided
-- **🧹 Auto Cleanup**: Comprehensive cleanup of debugging sessions
-- **⚡ Professional**: Production-ready with proper error handling and logging
-- **📊 Status Monitoring**: Real-time status checking and monitoring
-- **🛠️ Manual Fallback**: Manual step-by-step instructions when automation fails
+- **🎯 One-Command Setup** - Complete remote debugging setup with a single command
+- **🚀 Multi-App Support** - Debug multiple applications simultaneously with different ports
+- **🔌 Auto Port Assignment** - Automatically assigns available ports for each app
+- **🧹 Smart Cleanup** - Interactive cleanup for specific apps or all sessions
+- **📊 Status Monitoring** - Real-time status checking with active/inactive session indicators
+- **🔧 Multiple Debuggers** - Support for Chrome DevTools, VS Code, or both
+- **📱 Interactive Mode** - Interactive app selection when no app name is provided
+- **⚡ Production-Ready** - Proper error handling, logging, and session management
 
 ## 📋 Prerequisites
 
@@ -41,31 +43,29 @@ cds-debug my-cap-app
 ## 🛠️ Installation
 
 ### Option 1: NPX (Recommended)
+
+Run directly without installation:
+
 ```bash
-# Run directly without installation
-npx sap-cap-debugger setup my-app-name
+npx sap-cap-debugger my-app-name
 ```
 
 ### Option 2: Global Installation
+
 ```bash
-# Install globally
 npm install -g sap-cap-debugger
 
-# Use the command
+# Use either command name
 cds-debug my-app-name
 # or
 npx sap-cap-debugger my-app-name
 ```
 
 ### Option 3: Local Installation
-```bash
-# Install in your project
-npm install --save-dev sap-cap-debugger
 
-# Use with npx
+```bash
+npm install --save-dev sap-cap-debugger
 npx sap-cap-debugger my-app-name
-# or use the global command
-cds-debug my-app-name
 ```
 
 ## 📖 Usage
@@ -73,7 +73,7 @@ cds-debug my-app-name
 ### Basic Commands
 
 ```bash
-# Debug an application (interactive app selection if no name provided)
+# Debug an application (interactive selection if no name provided)
 npx sap-cap-debugger
 cds-debug
 
@@ -89,67 +89,75 @@ cds-debug my-app --port 9230
 npx sap-cap-debugger my-app --debugger vscode
 cds-debug my-app --debugger vscode
 
-# Debug with both Chrome and VS Code
-npx sap-cap-debugger my-app --debugger both
-cds-debug my-app --debugger both
-
-# Clean up debugging session
-npx sap-cap-debugger cleanup
-cds-debug cleanup
-
 # Check debugging status
 npx sap-cap-debugger status
 cds-debug status
+
+# Clean up debugging sessions
+npx sap-cap-debugger cleanup
+cds-debug cleanup
 
 # List available applications
 npx sap-cap-debugger apps
 cds-debug apps
 
-# Show manual debugging steps
-npx sap-cap-debugger manual my-cap-app
-cds-debug manual my-cap-app
+# Show help
+npx sap-cap-debugger --help
+cds-debug --help
 ```
 
 ### Command Options
 
-| Option | Description | Default | Values |
-|--------|-------------|---------|--------|
-| `--port, -p` | Debug port number | `9229` | Any available port |
-| `--debugger, -d` | Debugger type | `chrome` | `chrome`, `vscode`, `both` |
-| `--verbose, -v` | Enable verbose logging | `false` | `true`, `false` |
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--port, -p` | Debug port number | Auto-assigned (9229+) |
+| `--debugger, -d` | Debugger type | `chrome` |
+| `--verbose, -v` | Enable verbose logging | `false` |
+| `--help, -h` | Display help for command | - |
+
+**Debugger Types**: `chrome`, `vscode`, `both`
 
 ### Examples
 
 ```bash
-# Debug with Chrome DevTools
+# Debug with Chrome DevTools (default)
 npx sap-cap-debugger collaboration-srv
-# or
-cds-debug collaboration-srv
 
 # Debug with VS Code
 npx sap-cap-debugger collaboration-srv --debugger vscode
-# or
-cds-debug collaboration-srv --debugger vscode
 
 # Debug with both debuggers
 npx sap-cap-debugger collaboration-srv --debugger both
-# or
-cds-debug collaboration-srv --debugger both
 
 # Debug with custom port
 npx sap-cap-debugger collaboration-srv --port 9230
-# or
-cds-debug collaboration-srv --port 9230
 
 # Verbose output
 npx sap-cap-debugger collaboration-srv --verbose
-# or
-cds-debug collaboration-srv --verbose
 
 # Interactive app selection
 npx sap-cap-debugger
-# or
-cds-debug
+```
+
+## 🚀 Multi-App Debugging
+
+The tool supports debugging multiple applications simultaneously:
+
+- Each app gets its own local port (auto-assigned starting from 9229)
+- Each app has its own SSH tunnel to its container
+- Each app's inspector runs on port 9229 in its own container
+- Chrome DevTools opens directly to the correct debugging session for each app
+
+**Example:**
+```bash
+# Start debugging first app
+npx sap-cap-debugger app1-srv
+
+# Start debugging second app (gets port 9230 automatically)
+npx sap-cap-debugger app2-srv
+
+# Check status of all sessions
+npx sap-cap-debugger status
 ```
 
 ## 🔧 VS Code Configuration
@@ -177,27 +185,63 @@ For VS Code debugging, ensure your `.vscode/launch.json` contains:
 }
 ```
 
+**Note**: Update the `port` value if you're using a custom port or debugging multiple apps.
+
 ## 🎯 How It Works
 
-The tool uses the **`kill -USR1`** approach from SAP Community blogs, which enables the Node.js inspector on an already running process. This bypasses networking issues that occur with direct SSH tunneling.
+The tool uses the `kill -USR1` approach to enable the Node.js inspector on an already running process, which bypasses networking issues that occur with direct SSH tunneling.
 
 ### Process Flow
 
-1. **Prerequisites Check**: Verifies CF CLI and required tools
-2. **App Verification**: Checks app status and starts if needed
-3. **SSH Setup**: Enables SSH access for the application
-4. **Process Start**: Starts the CAP application normally
-5. **Process Detection**: Finds the Node.js process PID
-6. **Tunnel Creation**: Creates SSH tunnel for debugging port
-7. **Debug Enablement**: Enables debugging with `kill -USR1`
-8. **Debugger Launch**: Opens Chrome DevTools or VS Code
-9. **Session Management**: Tracks and manages the debugging session
+1. **Prerequisites Check** - Verifies CF CLI and required tools
+2. **App Verification** - Checks app status and starts if needed
+3. **SSH Setup** - Enables SSH access for the application (if not already enabled)
+4. **Port Assignment** - Automatically assigns an available port (or uses specified port)
+5. **Process Detection** - Finds the Node.js process PID in the app container
+6. **Tunnel Creation** - Creates SSH tunnel forwarding local port → remote port 9229
+7. **Debug Enablement** - Enables debugging with `kill -USR1` (always uses port 9229 on remote)
+8. **DevTools Launch** - Fetches inspector URL and opens Chrome DevTools directly
+9. **Session Management** - Tracks and manages multiple debugging sessions
+
+## 🔍 Status Monitoring
+
+Check the status of all debugging sessions:
+
+```bash
+npx sap-cap-debugger status
+cds-debug status
+```
+
+The status command displays:
+- **🟢 Active sessions** - Sessions with active SSH tunnels
+- **🔴 Inactive sessions** - Stale sessions that can be cleaned up
+- Port numbers, Node.js PIDs, and session start times
+
+## 🧹 Cleanup
+
+Clean up debugging sessions interactively:
+
+```bash
+# Interactive cleanup (select specific sessions or all)
+npx sap-cap-debugger cleanup
+cds-debug cleanup
+
+# Clean up specific app
+npx sap-cap-debugger cleanup my-app-name
+cds-debug cleanup my-app-name
+```
+
+The cleanup command:
+- Shows active and inactive sessions
+- Allows selection of specific sessions or all
+- Kills SSH tunnel processes
+- Frees up debugging ports
+- Removes session records
 
 ## 🚨 Troubleshooting
 
-### Common Issues
+### SSH Tunnel Connection Refused
 
-#### SSH Tunnel Connection Refused
 ```bash
 # Check if the application is running
 npx sap-cap-debugger status
@@ -205,11 +249,12 @@ npx sap-cap-debugger status
 # Check application logs
 cf logs my-app-name --recent
 
-# Try the setup again
-npx sap-cap-debugger setup my-app-name
+# Try again
+npx sap-cap-debugger my-app-name
 ```
 
-#### Application Not Starting
+### Application Not Starting
+
 ```bash
 # Check application logs
 cf logs my-app-name --recent
@@ -221,7 +266,8 @@ cf ssh my-app-name -c "which node"
 cf ssh my-app-name -c "ls -la /home/vcap/app"
 ```
 
-#### Debugger Not Connecting
+### Debugger Not Connecting
+
 ```bash
 # Verify SSH tunnel
 npx sap-cap-debugger status
@@ -231,9 +277,7 @@ cf ssh my-app-name -c "ps aux | grep node"
 
 # Clean up and retry
 npx sap-cap-debugger cleanup
-# or
-cds-debug cleanup
-npx sap-cap-debugger setup my-app-name
+npx sap-cap-debugger my-app-name
 ```
 
 ### Manual Debugging Steps
@@ -246,31 +290,6 @@ npx sap-cap-debugger manual my-app-name
 
 This will show step-by-step manual instructions.
 
-## 🔍 Status Monitoring
-
-```bash
-# Check current debugging status
-npx sap-cap-debugger status
-
-# List available applications
-npx sap-cap-debugger apps
-```
-
-## 🧹 Cleanup
-
-```bash
-# Clean up debugging session
-npx sap-cap-debugger cleanup
-# or
-cds-debug cleanup
-```
-
-This will:
-- Kill SSH tunnel processes
-- Free up debugging ports
-- Clean up any remaining processes
-- Reset the debugging environment
-
 ## 🏗️ Development
 
 ### Building from Source
@@ -281,16 +300,16 @@ git clone https://github.com/HatriGt/sap-cap-debugger.git
 cd sap-cap-debugger
 
 # Install dependencies
-bun install
+npm install
 
 # Build the project
-bun run build
+npm run build
 
 # Run tests
-bun test
+npm test
 
 # Run linting
-bun run lint
+npm run lint
 ```
 
 ### Project Structure
@@ -308,51 +327,20 @@ src/
 ├── utils/
 │   ├── logger.ts             # Logging utilities
 │   └── command.ts            # Command execution
-├── types/
-│   └── index.ts              # TypeScript types
-└── __tests__/                # Test files
-```
-
-### Publishing to NPM
-
-```bash
-# Build the project
-bun run build
-
-# Run tests
-bun test
-
-# Publish to NPM
-npm publish
+└── types/
+    └── index.ts              # TypeScript types
 ```
 
 ## 🤝 Contributing
 
 We welcome contributions! Here's how to get started:
 
-### Development Setup
-
-```bash
-# Fork and clone the repository
-git clone https://github.com/HatriGt/sap-cap-debugger.git
-cd sap-cap-debugger
-
-# Install dependencies
-bun install
-
-# Create a feature branch
-git checkout -b feature/amazing-feature
-
-# Make your changes and test
-bun test
-bun run lint
-
-# Commit and push
-git commit -m "Add amazing feature"
-git push origin feature/amazing-feature
-
-# Create a Pull Request
-```
+1. Fork and clone the repository
+2. Create a feature branch: `git checkout -b feature/amazing-feature`
+3. Make your changes and test: `npm test && npm run lint`
+4. Commit your changes: `git commit -m "feat: Add amazing feature"`
+5. Push to the branch: `git push origin feature/amazing-feature`
+6. Create a Pull Request
 
 ### Commit Convention
 
@@ -388,7 +376,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**Note**: This tool is specifically designed for SAP CAP applications before version 8, where the built-in `cds debug` command is not available. For CAP v8+ applications, consider using the official `cds debug` command.
+**Note**: This tool works with SAP CAP applications of all versions (v7, v8, and later). While CAP v8+ includes the built-in `cds debug` command, this tool provides additional features like multi-app debugging, automatic port assignment, and direct DevTools integration that may be useful for advanced debugging scenarios.
 
 ---
 

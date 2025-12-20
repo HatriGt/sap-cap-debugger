@@ -29,7 +29,11 @@ export class CAPDebugger {
       }
 
       // Verify app status
-      const appStatus = await this.cfClient.getAppStatus(config.appName);
+      this.logger.loading('Checking application status...');
+      const apps = await this.cfClient.getApps();
+      const appStatus = apps.find(app => app.name === config.appName) || null;
+      this.logger.stopLoading();
+      
       if (!appStatus) {
         this.logger.error(`Application '${config.appName}' not found in current space`);
         await this.showAvailableApps();
@@ -38,12 +42,13 @@ export class CAPDebugger {
 
       if (appStatus.status !== 'started') {
         this.logger.warning(`Application '${config.appName}' is not started (status: ${appStatus.status})`);
-        this.logger.info('Attempting to start the application...');
-        
+        this.logger.loading('Starting the application...');
         if (!await this.cfClient.startApp(config.appName)) {
+          this.logger.stopLoading();
           this.logger.error('Failed to start application. Check logs with: cf logs ' + config.appName + ' --recent');
           return false;
         }
+        this.logger.stopLoading();
       } else {
         this.logger.success(`Application '${config.appName}' is running`);
       }
@@ -68,28 +73,57 @@ export class CAPDebugger {
         }
         
         // Restart the app to apply SSH changes
-        this.logger.info('Restarting application to apply SSH changes...');
         if (!await this.cfClient.startApp(config.appName)) {
           this.logger.error('Failed to restart application after enabling SSH');
           return false;
         }
         
         // Wait for app to be ready
-        this.logger.info('Waiting for application to be ready...');
+        this.logger.loading('Waiting for application to be ready...');
         await new Promise(resolve => setTimeout(resolve, 5000));
+        this.logger.stopLoading();
       }
 
-      // Cleanup any existing debugging session
-      await this.cleanup();
+      // Cleanup any existing debugging session for this app first
+      const existingSession = this.portManager.getSession(config.appName);
+      if (existingSession) {
+        this.logger.info(`Cleaning up existing session for ${config.appName}...`);
+        await this.cleanup(config.appName);
+        // Wait a moment for processes to fully terminate
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
 
-      // Check if port is already in use
-      if (await this.portManager.isPortInUse(config.debugPort)) {
-        this.logger.warning(`Port ${config.debugPort} is already in use. Debugging may already be running.`);
-        return false;
+      // Use the port from config (already assigned by CLI or user)
+      const debugPort = config.debugPort;
+      
+      // Check if port is in use and clean it up if needed
+      if (await this.portManager.isPortInUse(debugPort)) {
+        // Check if it's our own session
+        const existingSession = this.portManager.getSession(config.appName);
+        if (existingSession && existingSession.debugPort === debugPort) {
+          // This is our session, it will be cleaned up above
+          this.logger.debug(`Port ${debugPort} is in use by existing session for ${config.appName}`);
+        } else {
+          // Try to clean up the port first
+          this.logger.info(`Port ${debugPort} is in use, attempting to clean up...`);
+          await this.portManager.cleanupPort(debugPort);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          
+          // Check again
+          if (await this.portManager.isPortInUse(debugPort)) {
+            const otherSession = this.portManager.getAllSessions().find(s => s.debugPort === debugPort && s.appName !== config.appName);
+            if (otherSession) {
+              this.logger.error(`Port ${debugPort} is already in use by ${otherSession.appName}`);
+              return false;
+            } else {
+              this.logger.warning(`Port ${debugPort} is still in use after cleanup. Proceeding anyway...`);
+            }
+          }
+        }
       }
 
       // Start the application process
-      this.logger.step('Starting application process...');
+      // Note: The app is already running, but we call this to ensure the process is active
       const appResult = await this.cfClient.startAppProcess(config.appName);
       
       if (!appResult.success) {
@@ -98,30 +132,71 @@ export class CAPDebugger {
       }
 
       // Wait for the app to start
-      this.logger.info('Waiting for application to start...');
+      this.logger.loading('Waiting for application to start...');
       await new Promise(resolve => setTimeout(resolve, 8000));
+      this.logger.stopLoading();
 
       // Find Node.js process
+      this.logger.loading(`Finding Node.js process for ${config.appName}...`);
       const nodeProcess = await this.cfClient.findNodeProcess(config.appName);
+      this.logger.stopLoading();
+      
       if (!nodeProcess) {
-        this.logger.error('Failed to find Node.js process. Cannot continue.');
+        this.logger.error(`Failed to find Node.js process for ${config.appName}. Cannot continue.`);
         return false;
       }
 
-      // Create SSH tunnel
-      if (!await this.sshTunnel.createTunnel(config.appName, config.debugPort, config.debugPort)) {
-        this.logger.error('Failed to create SSH tunnel');
+      this.logger.info(`Found Node.js process: PID ${nodeProcess.pid} for ${config.appName}`);
+      this.logger.info(`Process command: ${nodeProcess.command.substring(0, 80)}...`);
+
+      // Create SSH tunnel - forward local port to remote inspector port
+      // IMPORTANT: kill -USR1 always uses port 9229 on the remote side
+      // So we must forward to remote port 9229, not config.debugPort
+      // Each app has its own container, so each has its own inspector on port 9229
+      const remoteInspectorPort = 9229; // kill -USR1 always uses 9229
+      this.logger.loading(`Creating SSH tunnel for ${config.appName}...`);
+      this.logger.info(`Tunnel: localhost:${config.debugPort} -> ${config.appName}:${remoteInspectorPort}`);
+      this.logger.info(`Note: Each app has its own inspector on port ${remoteInspectorPort} in its own container`);
+      const tunnelCreated = await this.sshTunnel.createTunnel(config.appName, config.debugPort, remoteInspectorPort);
+      this.logger.stopLoading();
+      
+      if (!tunnelCreated) {
+        this.logger.error(`Failed to create SSH tunnel for ${config.appName} on port ${config.debugPort}`);
+        this.logger.error('This might be due to:');
+        this.logger.error('  - Cloud Foundry SSH connection limit');
+        this.logger.error('  - Network connectivity issues');
+        this.logger.error('  - Authentication problems');
+        this.logger.error(`Try running: cf ssh ${config.appName} -c 'echo test' to verify SSH access`);
         return false;
       }
 
-      // Enable debugging
-      if (!await this.cfClient.enableDebugging(config.appName, nodeProcess.pid)) {
-        this.logger.error('Failed to enable debugging');
+      this.logger.success(`SSH tunnel created: localhost:${config.debugPort} -> ${config.appName}:${remoteInspectorPort}`);
+      this.logger.info(`This tunnel connects to ${config.appName}'s inspector (PID ${nodeProcess.pid})`);
+
+      // Enable debugging on the specific process
+      // Note: kill -USR1 always enables inspector on port 9229 on the remote side
+      this.logger.info(`Enabling debugging on process ${nodeProcess.pid} for ${config.appName}...`);
+      if (!await this.cfClient.enableDebugging(config.appName, nodeProcess.pid, config.debugPort)) {
+        this.logger.error(`Failed to enable debugging on process ${nodeProcess.pid} for ${config.appName}`);
         return false;
       }
+      
+      this.logger.success(`Debugging enabled on PID ${nodeProcess.pid} for ${config.appName} (port ${remoteInspectorPort})`);
 
-      // Verify tunnel
+      // Wait a moment for tunnel to fully establish
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      // Verify tunnel is actually working
+      this.logger.loading('Verifying tunnel...');
+      const portInUse = await this.portManager.isPortInUse(config.debugPort);
+      if (!portInUse) {
+        this.logger.stopLoading();
+        this.logger.error(`Port ${config.debugPort} is not in use - tunnel may have failed`);
+        this.logger.error('The SSH tunnel process may have exited. Check the logs above for errors.');
+        return false;
+      }
       await this.portManager.verifyPort(config.debugPort);
+      this.logger.stopLoading();
 
       // Launch debugger
       await this.debuggerLauncher.launchDebugger(config.debuggerType, config.debugPort);
@@ -136,6 +211,9 @@ export class CAPDebugger {
         startTime: new Date()
       };
 
+      // Save session
+      this.portManager.saveSession(this.currentSession);
+
       this.showDebuggingInfo(config);
       return true;
 
@@ -145,40 +223,113 @@ export class CAPDebugger {
     }
   }
 
-  async cleanup(): Promise<void> {
-    this.logger.info('Cleaning up debugging session...');
-    
-    await this.sshTunnel.killTunnel();
-    await this.portManager.cleanupPort(9229);
-    
-    this.currentSession = null;
-    this.logger.success('Cleanup complete!');
+  async cleanup(appName?: string): Promise<void> {
+    if (appName) {
+      // Cleanup specific app
+      this.logger.loading(`Cleaning up debugging session for ${appName}...`);
+      
+      const session = this.portManager.getSession(appName);
+      if (session) {
+        // Kill the SSH tunnel for this specific port
+        await this.sshTunnel.killTunnel(session.debugPort);
+        await this.portManager.cleanupPort(session.debugPort);
+        this.portManager.removeSession(appName);
+        if (this.currentSession && this.currentSession.appName === appName) {
+          this.currentSession = null;
+        }
+        this.logger.stopLoading();
+        this.logger.success(`Cleanup complete for ${appName}!`);
+      } else {
+        this.logger.stopLoading();
+        this.logger.warning(`No active session found for ${appName}`);
+      }
+    } else {
+      // Cleanup all sessions
+      this.logger.loading('Cleaning up all debugging sessions...');
+      
+      const sessions = this.portManager.getAllSessions();
+      for (const session of sessions) {
+        // Kill the SSH tunnel for each port
+        await this.sshTunnel.killTunnel(session.debugPort);
+        await this.portManager.cleanupPort(session.debugPort);
+      }
+      
+      this.portManager.clearAllSessions();
+      // Kill any remaining tunnels
+      await this.sshTunnel.killTunnel();
+      
+      this.currentSession = null;
+      this.logger.stopLoading();
+      this.logger.success('Cleanup complete!');
+    }
+  }
+
+  getAllSessions(): DebugSession[] {
+    return this.portManager.getAllSessions();
   }
 
   async showStatus(): Promise<void> {
-    this.logger.info('Checking debugging status...');
+    this.logger.loading('Checking debugging status...');
+    
+    const sessions = this.portManager.getAllSessions();
+    this.logger.stopLoading();
     
     console.log('');
-    console.log('🔍 SSH Processes:');
-    // This would need to be implemented with process checking
-    console.log('  (SSH process checking not implemented in this version)');
     
-    console.log('');
-    console.log('🔍 Port 9229 Status:');
-    const portInUse = await this.portManager.isPortInUse(9229);
-    if (portInUse) {
-      console.log('  Port 9229 is in use');
-    } else {
-      console.log('  Port 9229 is free');
+    if (sessions.length === 0) {
+      console.log('🔍 Active Debugging Sessions:');
+      console.log('  No active sessions');
+      console.log('');
+      return;
     }
     
-    if (this.currentSession) {
+    // Separate active and inactive sessions
+    this.logger.loading('Checking session status...');
+    const activeSessions: DebugSession[] = [];
+    const inactiveSessions: DebugSession[] = [];
+    
+    for (const session of sessions) {
+      const portInUse = await this.portManager.isPortInUse(session.debugPort);
+      if (portInUse) {
+        activeSessions.push(session);
+      } else {
+        inactiveSessions.push(session);
+      }
+    }
+    this.logger.stopLoading();
+    
+    // Show active sessions
+    if (activeSessions.length > 0) {
+      console.log('🟢 Active Debugging Sessions:');
+      for (const session of activeSessions) {
+        const duration = Math.floor((Date.now() - session.startTime.getTime()) / 1000 / 60);
+        console.log(`  ${session.appName}`);
+        console.log(`    Port: ${session.debugPort}`);
+        console.log(`    Node PID: ${session.nodePid}`);
+        console.log(`    Started: ${session.startTime.toLocaleString()} (${duration} min ago)`);
+        console.log(`    Connect: chrome://inspect or http://localhost:${session.debugPort}`);
+        console.log('');
+      }
+    }
+    
+    // Show inactive sessions
+    if (inactiveSessions.length > 0) {
+      console.log('🔴 Inactive Sessions (stale - can be cleaned up):');
+      for (const session of inactiveSessions) {
+        const duration = Math.floor((Date.now() - session.startTime.getTime()) / 1000 / 60);
+        console.log(`  ${session.appName}`);
+        console.log(`    Port: ${session.debugPort} (not in use)`);
+        console.log(`    Node PID: ${session.nodePid}`);
+        console.log(`    Started: ${session.startTime.toLocaleString()} (${duration} min ago)`);
+        console.log('');
+      }
+      console.log('💡 Tip: Run "cds-debug cleanup" to remove inactive sessions');
       console.log('');
-      console.log('🔍 Current Session:');
-      console.log(`  App: ${this.currentSession.appName}`);
-      console.log(`  Node PID: ${this.currentSession.nodePid}`);
-      console.log(`  Debug Port: ${this.currentSession.debugPort}`);
-      console.log(`  Started: ${this.currentSession.startTime.toISOString()}`);
+    }
+    
+    if (activeSessions.length === 0 && inactiveSessions.length === 0) {
+      console.log('  No sessions found');
+      console.log('');
     }
   }
 
@@ -204,13 +355,14 @@ export class CAPDebugger {
     console.log(`  • Debugger Type: ${config.debuggerType}`);
     console.log('');
     console.log('🔧 Next Steps:');
-    console.log('  1. Debugger should be open automatically');
-    console.log('  2. Set breakpoints in your code');
-    console.log('  3. Trigger your application');
-    console.log('  4. Use this tool to cleanup when done');
+    console.log('  1. Chrome DevTools should be open automatically');
+    console.log('  2. Click \'inspect\' on your Node.js process');
+    console.log('  3. Set breakpoints in your code');
+    console.log('  4. Trigger your application');
+    console.log('  5. Use this tool to cleanup when done');
     console.log('');
-    console.log('🧹 To cleanup: npx sap-cap-debugger cleanup');
-    console.log('🧹 To cleanup: cds-debug cleanup');
+    console.log(`🧹 To cleanup this app: cds-debug cleanup ${config.appName}`);
+    console.log('🧹 To cleanup all: cds-debug cleanup');
     console.log('');
     console.log('⚠️  IMPORTANT: Keep this terminal open! The debugging session will continue running.');
     console.log('   The processes will keep running until you run cleanup');

@@ -7,13 +7,15 @@ import { createLogger } from '../utils/logger';
 import { DebugConfig, DebuggerType } from '../types';
 import { PortManager } from '../lib/port-manager';
 import { CommandExecutor } from '../utils/command';
+import pkg from '../../package.json';
 
 const program = new Command();
 
 program
   .name('cds-debug')
   .description('Professional NPX tool for remote debugging SAP CAP applications on Cloud Foundry')
-  .version('1.0.0')
+  .version(pkg.version)
+  .helpOption('-h, --help', 'Display help for command')
   .usage('[app-name] [options]')
   .addHelpText('after', `
 Examples:
@@ -37,7 +39,6 @@ For more information, visit: https://github.com/HatriGt/sap-cap-debugger
   .option('-d, --debugger <type>', 'Debugger type: chrome, vscode, or both (default: chrome)', 'chrome')
   .option('-w, --workspace <name>', 'Workspace name to use (otherwise select interactively)')
   .option('-v, --verbose', 'Enable verbose logging', false)
-  .option('-h, --help', 'Display help for command')
   .action(async (appName, options) => {
     const logger = createLogger(options.verbose);
     const capDebugger = new CAPDebugger(logger);

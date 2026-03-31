@@ -11,8 +11,6 @@ A production-ready solution for debugging SAP Cloud Application Programming (CAP
 
 It enables the Node.js inspector (port 9229) inside a running CF container using `cf ssh` and `kill -USR1`, then forwards it locally (so you can attach with DevTools). It also supports Cloud Foundry SSO (`cf login --sso`) and multi-space “workspaces” (isolated CF targets via `CF_HOME`) so you can debug apps across different org/space targets concurrently.
 
-**Keywords**: `cds-debug`, SAP CAP remote debugging, SAP BTP Cloud Foundry, `cf ssh`, Node inspector 9229, `kill -USR1`, `cf login --sso`, multiple spaces, workspaces, Chrome DevTools, VS Code attach.
-
 > **💡 Command Names**: You can use either `npx sap-cap-debugger` or `cds-debug` (if installed globally). Both commands work identically throughout this documentation.
 
 ## 🚀 Quick Start
@@ -409,6 +407,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [SAP Cloud Application Programming](https://cap.cloud.sap/)
 - [SAP Cloud SDK](https://sap.github.io/cloud-sdk/)
 - [SAP Business Technology Platform](https://www.sap.com/products/technology-platform.html)
+
+**Keywords**: `cds-debug`, SAP CAP remote debugging, SAP BTP Cloud Foundry, `cf ssh`, Node inspector 9229, `kill -USR1`, `cf login --sso`, multiple spaces, workspaces, Chrome DevTools, VS Code attach.
 
 ---
 

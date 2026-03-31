@@ -2,13 +2,59 @@ import { CommandExecutor } from '../utils/command';
 import { AppStatus, ProcessInfo, CommandResult } from '../types';
 import { Logger } from '../types';
 
+export class AuthExpiredError extends Error {
+  workspaceName?: string;
+  constructor(message: string, workspaceName?: string) {
+    super(message);
+    this.name = 'AuthExpiredError';
+    this.workspaceName = workspaceName;
+  }
+}
+
+function isCfAuthError(output: string): boolean {
+  const text = (output || '').toLowerCase();
+  return (
+    text.includes('not authenticated') ||
+    text.includes('authentication has expired') ||
+    text.includes('invalid token') ||
+    text.includes('unauthorized') ||
+    (text.includes('request error') && (text.includes(' 401') || text.includes(' 403'))) ||
+    text.includes('status code: 401') ||
+    text.includes('status code: 403')
+  );
+}
+
 export class CloudFoundryClient {
   private commandExecutor: CommandExecutor;
   private logger: Logger;
+  private cfEnv?: Record<string, string>;
+  private workspaceName?: string;
 
-  constructor(logger: Logger) {
+  constructor(logger: Logger, cfEnv?: Record<string, string>, workspaceName?: string) {
     this.logger = logger;
     this.commandExecutor = new CommandExecutor(logger);
+    this.cfEnv = cfEnv;
+    this.workspaceName = workspaceName;
+  }
+
+  private async cf(args: string[], options: any = {}): Promise<CommandResult> {
+    const result = await this.commandExecutor.execute('cf', args, {
+      ...options,
+      env: this.cfEnv ? { ...process.env, ...this.cfEnv } : options.env
+    });
+
+    if (!result.success && isCfAuthError(result.output || result.error || '')) {
+      throw new AuthExpiredError('Cloud Foundry authentication appears to have expired.', this.workspaceName);
+    }
+
+    return result;
+  }
+
+  async login(loginMethod: 'standard' | 'sso' = 'standard'): Promise<CommandResult> {
+    // Keep it interactive; caller decides whether to prompt user first.
+    // timeout: 0 means no timeout in execa.
+    const args = loginMethod === 'sso' ? ['login', '--sso'] : ['login'];
+    return await this.cf(args, { timeout: 0 });
   }
 
   async checkPrerequisites(): Promise<boolean> {
@@ -35,7 +81,7 @@ export class CloudFoundryClient {
 
   async getApps(): Promise<AppStatus[]> {
     this.logger.loading('Fetching applications...');
-    const result = await this.commandExecutor.execute('cf', ['apps']);
+    const result = await this.cf(['apps']);
     this.logger.stopLoading();
     
     if (!result.success) {
@@ -72,7 +118,7 @@ export class CloudFoundryClient {
   async startApp(appName: string): Promise<boolean> {
     this.logger.loading(`Starting application: ${appName}...`);
     
-    const result = await this.commandExecutor.execute('cf', ['start', appName]);
+    const result = await this.cf(['start', appName]);
     
     if (result.success) {
       this.logger.stopLoading();
@@ -88,7 +134,7 @@ export class CloudFoundryClient {
   async enableSSH(appName: string): Promise<boolean> {
     this.logger.loading(`Enabling SSH access for application: ${appName}...`);
     
-    const result = await this.commandExecutor.execute('cf', ['enable-ssh', appName]);
+    const result = await this.cf(['enable-ssh', appName]);
     
     if (result.success) {
       this.logger.stopLoading();
@@ -104,7 +150,7 @@ export class CloudFoundryClient {
   async checkSSHEnabled(appName: string): Promise<boolean> {
     this.logger.loading(`Checking SSH access for application: ${appName}...`);
     
-    const result = await this.commandExecutor.execute('cf', ['ssh-enabled', appName]);
+    const result = await this.cf(['ssh-enabled', appName]);
     
     if (result.success) {
       const output = result.output.toLowerCase().trim();
@@ -113,6 +159,7 @@ export class CloudFoundryClient {
       // Common formats:
       // - "ssh is enabled"
       // - "ssh enabled"
+      // - "ssh support is enabled for app '...'."
       // - "enabled"
       // - "true" (some CF versions)
       if (output.includes('enabled') || output.includes('true')) {
@@ -137,10 +184,12 @@ export class CloudFoundryClient {
     
     // If we can't determine status, try a direct SSH test
     this.logger.update('Testing SSH connection...');
-    const sshTest = await this.commandExecutor.execute('cf', [
-      'ssh', appName, '-c', 'echo "test"'
+    const sshTest = await this.cf([
+      // -T: disable pseudo-tty allocation (more reliable in non-interactive execution)
+      'ssh', '-T', appName, '-c', 'echo "test"'
     ], {
-      timeout: 5000
+      // First SSH attempt can be slow due to key exchange / initial handshake.
+      timeout: 15000
     });
     
     if (sshTest.success) {
@@ -164,7 +213,7 @@ export class CloudFoundryClient {
     
     const command = `export PATH='/home/vcap/deps/0/bin:$PATH' && cd /home/vcap/app && /home/vcap/deps/0/bin/node ${entryPoint}`;
     
-    const result = await this.commandExecutor.execute('cf', ['ssh', appName, '-c', command]);
+    const result = await this.cf(['ssh', appName, '-c', command]);
     this.logger.stopLoading();
     return result;
   }
@@ -173,7 +222,7 @@ export class CloudFoundryClient {
     this.logger.loading('Detecting application entry point...');
     
     // First, try to find server.js files using find command
-    const findResult = await this.commandExecutor.execute('cf', [
+    const findResult = await this.cf([
       'ssh', appName, '-c', 
       'find /home/vcap/app -maxdepth 3 -name "server.js" -type f 2>/dev/null'
     ]);
@@ -197,7 +246,7 @@ export class CloudFoundryClient {
     
     // Fallback: Check package.json for main entry point
     this.logger.update('Checking package.json...');
-    const packageJsonResult = await this.commandExecutor.execute('cf', [
+    const packageJsonResult = await this.cf([
       'ssh', appName, '-c', 'cat /home/vcap/app/package.json 2>/dev/null | grep -E "\"main\"|\"start\"" | head -5'
     ]);
     
@@ -207,7 +256,7 @@ export class CloudFoundryClient {
       if (mainMatch && mainMatch[1]) {
         const entryPoint = mainMatch[1];
         // Verify it exists
-        const verifyResult = await this.commandExecutor.execute('cf', [
+        const verifyResult = await this.cf([
           'ssh', appName, '-c', `test -f /home/vcap/app/${entryPoint} && echo "exists"`
         ]);
         if (verifyResult.success && verifyResult.output.trim() === 'exists') {
@@ -222,7 +271,7 @@ export class CloudFoundryClient {
     this.logger.update('Checking common locations...');
     const commonPaths = ['server.js', 'srv/server.js', 'app/server.js', 'index.js'];
     for (const entryPoint of commonPaths) {
-      const result = await this.commandExecutor.execute('cf', [
+      const result = await this.cf([
         'ssh', appName, '-c', `test -f /home/vcap/app/${entryPoint} && echo "exists"`
       ]);
       if (result.success && result.output.trim() === 'exists') {
@@ -244,7 +293,7 @@ export class CloudFoundryClient {
 
     while (attempt <= maxAttempts) {
       this.logger.loading(`Finding Node.js process... (attempt ${attempt}/${maxAttempts})`);
-      const result = await this.commandExecutor.execute('cf', ['ssh', appName, '-c', 'ps aux | grep node | grep -v grep']);
+      const result = await this.cf(['ssh', appName, '-c', 'ps aux | grep node | grep -v grep']);
       
       if (result.success && result.output.trim()) {
         const lines = result.output.trim().split('\n');
@@ -285,8 +334,8 @@ export class CloudFoundryClient {
     
     // Check if inspector is already running on the remote side (always port 9229)
     this.logger.update('Checking if inspector is already running...');
-    const checkResult = await this.commandExecutor.execute('cf', [
-      'ssh', appName, '-c', 
+    const checkResult = await this.cf([
+      'ssh', appName, '-c',
       `netstat -an 2>/dev/null | grep 9229 || ss -an 2>/dev/null | grep 9229 || echo "not found"`
     ]);
     
@@ -297,7 +346,7 @@ export class CloudFoundryClient {
     }
     
     // Use kill -USR1 to enable debugging (always uses port 9229 on remote side)
-    const result = await this.commandExecutor.execute('cf', ['ssh', appName, '-c', `kill -USR1 ${pid}`]);
+    const result = await this.cf(['ssh', appName, '-c', `kill -USR1 ${pid}`]);
     
     if (result.success) {
       this.logger.stopLoading();
@@ -316,7 +365,7 @@ export class CloudFoundryClient {
   }
 
   async getAppLogs(appName: string): Promise<string> {
-    const result = await this.commandExecutor.execute('cf', ['logs', appName, '--recent']);
+    const result = await this.cf(['logs', appName, '--recent']);
     return result.output;
   }
 }

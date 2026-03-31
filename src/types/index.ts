@@ -1,5 +1,7 @@
 export interface DebugConfig {
   appName: string;
+  workspaceName?: string;
+  workspaceCfHomeDir?: string;
   debugPort: number;
   debuggerType: 'chrome' | 'vscode' | 'both';
   autoCleanup: boolean;
@@ -23,11 +25,25 @@ export interface AppStatus {
 
 export interface DebugSession {
   appName: string;
+  workspaceName?: string;
   nodePid: number;
   sshTunnelPid: number;
   appProcessPid: number;
   debugPort: number;
   startTime: Date;
+}
+
+export type WorkspaceLoginMethod = 'standard' | 'sso';
+
+export interface WorkspaceConfig {
+  name: string;
+  cfHomeDir: string;
+  apiUrl?: string;
+  org?: string;
+  space?: string;
+  loginMethod?: WorkspaceLoginMethod;
+  createdAt: string; // ISO string
+  lastUsedAt: string; // ISO string
 }
 
 export interface CommandResult {

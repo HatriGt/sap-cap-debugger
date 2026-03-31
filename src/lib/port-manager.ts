@@ -3,6 +3,7 @@ import { Logger, DebugSession } from '../types';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { getCdsDebugBaseDir } from './workspaces';
 
 export class PortManager {
   private commandExecutor: CommandExecutor;
@@ -13,13 +14,17 @@ export class PortManager {
   constructor(logger: Logger) {
     this.logger = logger;
     this.commandExecutor = new CommandExecutor(logger);
-    this.sessionFile = path.join(os.homedir(), '.cap-debugger-sessions.json');
+    // Store sessions under ~/.cds-debug/ to keep all tool state together.
+    // We still read the legacy file if present for backward compatibility.
+    this.sessionFile = path.join(getCdsDebugBaseDir(), 'sessions.json');
   }
 
   private loadSessions(): DebugSession[] {
     try {
-      if (fs.existsSync(this.sessionFile)) {
-        const content = fs.readFileSync(this.sessionFile, 'utf-8');
+      const legacyFile = path.join(os.homedir(), '.cap-debugger-sessions.json');
+      const fileToRead = fs.existsSync(this.sessionFile) ? this.sessionFile : (fs.existsSync(legacyFile) ? legacyFile : null);
+      if (fileToRead) {
+        const content = fs.readFileSync(fileToRead, 'utf-8');
         const sessions = JSON.parse(content);
         // Convert startTime strings back to Date objects
         return sessions.map((s: any) => ({
@@ -35,16 +40,17 @@ export class PortManager {
 
   private saveSessions(sessions: DebugSession[]): void {
     try {
+      fs.mkdirSync(path.dirname(this.sessionFile), { recursive: true });
       fs.writeFileSync(this.sessionFile, JSON.stringify(sessions, null, 2));
     } catch (error) {
       this.logger.debug(`Failed to save sessions: ${error}`);
     }
   }
 
-  async getPortForApp(appName: string): Promise<number> {
+  async getPortForApp(appName: string, workspaceName?: string): Promise<number> {
     this.logger.loading(`Assigning port for ${appName}...`);
     const sessions = this.loadSessions();
-    const existingSession = sessions.find(s => s.appName === appName);
+    const existingSession = sessions.find(s => s.appName === appName && (s.workspaceName || '') === (workspaceName || ''));
     
     if (existingSession) {
       // Verify port is still in use
@@ -57,7 +63,7 @@ export class PortManager {
         return existingSession.debugPort;
       } else {
         // Port is free, remove stale session
-        this.removeSession(appName);
+        this.removeSession(appName, workspaceName);
       }
     }
     
@@ -99,7 +105,9 @@ export class PortManager {
 
   saveSession(session: DebugSession): void {
     const sessions = this.loadSessions();
-    const existingIndex = sessions.findIndex(s => s.appName === session.appName);
+    const existingIndex = sessions.findIndex(s =>
+      s.appName === session.appName && (s.workspaceName || '') === (session.workspaceName || '')
+    );
     
     if (existingIndex >= 0) {
       sessions[existingIndex] = session;
@@ -110,18 +118,18 @@ export class PortManager {
     this.saveSessions(sessions);
   }
 
-  getSession(appName: string): DebugSession | null {
+  getSession(appName: string, workspaceName?: string): DebugSession | null {
     const sessions = this.loadSessions();
-    return sessions.find(s => s.appName === appName) || null;
+    return sessions.find(s => s.appName === appName && (s.workspaceName || '') === (workspaceName || '')) || null;
   }
 
   getAllSessions(): DebugSession[] {
     return this.loadSessions();
   }
 
-  removeSession(appName: string): void {
+  removeSession(appName: string, workspaceName?: string): void {
     const sessions = this.loadSessions();
-    const filtered = sessions.filter(s => s.appName !== appName);
+    const filtered = sessions.filter(s => !(s.appName === appName && (s.workspaceName || '') === (workspaceName || '')));
     this.saveSessions(filtered);
   }
 

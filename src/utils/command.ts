@@ -21,7 +21,9 @@ export class CommandExecutor {
 
       return {
         success: true,
-        output: result.stdout,
+        // Some CLIs (including cf in certain setups) may print relevant info to stderr.
+        // We intentionally combine both streams to make downstream parsing reliable.
+        output: [result.stdout, result.stderr].filter(Boolean).join('\n'),
         exitCode: result.exitCode
       };
     } catch (error: any) {
@@ -29,7 +31,7 @@ export class CommandExecutor {
       
       return {
         success: false,
-        output: error.stdout || '',
+        output: [error.stdout, error.stderr].filter(Boolean).join('\n'),
         error: error.message,
         exitCode: error.exitCode
       };

@@ -7,7 +7,11 @@
 
 > Professional NPX tool for remote debugging SAP CAP applications on Cloud Foundry
 
-A production-ready solution for debugging SAP Cloud Application Programming (CAP) applications deployed on SAP Business Technology Platform (BTP) Cloud Foundry. This tool simplifies remote debugging setup with automatic port assignment, multi-app support, and direct DevTools integration.
+A production-ready solution for debugging SAP Cloud Application Programming (CAP) applications deployed on SAP Business Technology Platform (BTP) Cloud Foundry. This tool simplifies remote debugging setup with automatic port assignment, multi-app support, and direct Chrome DevTools / VS Code attach.
+
+It enables the Node.js inspector (port 9229) inside a running CF container using `cf ssh` and `kill -USR1`, then forwards it locally (so you can attach with DevTools). It also supports Cloud Foundry SSO (`cf login --sso`) and multi-space “workspaces” (isolated CF targets via `CF_HOME`) so you can debug apps across different org/space targets concurrently.
+
+**Keywords**: `cds-debug`, SAP CAP remote debugging, SAP BTP Cloud Foundry, `cf ssh`, Node inspector 9229, `kill -USR1`, `cf login --sso`, multiple spaces, workspaces, Chrome DevTools, VS Code attach.
 
 > **💡 Command Names**: You can use either `npx sap-cap-debugger` or `cds-debug` (if installed globally). Both commands work identically throughout this documentation.
 
@@ -158,6 +162,38 @@ npx sap-cap-debugger app2-srv
 
 # Check status of all sessions
 npx sap-cap-debugger status
+```
+
+## 🧭 Workspaces (Multiple CF Spaces/Subaccounts)
+
+Cloud Foundry CLI normally targets one org/space at a time. To debug apps across **different spaces or subaccounts concurrently**, this tool supports **workspaces**.
+
+A workspace is an isolated Cloud Foundry login context backed by CF CLI’s supported config override `CF_HOME`, so you can keep multiple targets logged in at once.
+
+### Workspace commands
+
+```bash
+# Add a workspace (prompts for API + login method)
+cds-debug workspace add
+
+# List workspaces
+cds-debug workspace list
+
+# Remove a workspace (metadata only)
+cds-debug workspace remove pp
+```
+
+### Debugging with workspaces
+
+```bash
+# Pick workspace interactively (if multiple exist)
+cds-debug my-app
+
+# Or choose explicitly
+cds-debug --workspace pp my-app
+
+# Debug another app in a different workspace at the same time (use a different port)
+cds-debug --workspace qa other-app --port 9230
 ```
 
 ## 🔧 VS Code Configuration

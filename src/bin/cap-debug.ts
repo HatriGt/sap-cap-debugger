@@ -6,6 +6,7 @@ import { CAPDebugger } from '../lib/cap-debugger';
 import { createLogger } from '../utils/logger';
 import { DebugConfig, DebuggerType } from '../types';
 import { PortManager } from '../lib/port-manager';
+import { CommandExecutor } from '../utils/command';
 
 const program = new Command();
 
@@ -34,18 +35,71 @@ For more information, visit: https://github.com/HatriGt/sap-cap-debugger
   .argument('[app-name]', 'Name of the CAP application to debug')
   .option('-p, --port <port>', 'Debug port number (default: auto-assigned)', '9229')
   .option('-d, --debugger <type>', 'Debugger type: chrome, vscode, or both (default: chrome)', 'chrome')
+  .option('-w, --workspace <name>', 'Workspace name to use (otherwise select interactively)')
   .option('-v, --verbose', 'Enable verbose logging', false)
   .option('-h, --help', 'Display help for command')
   .action(async (appName, options) => {
     const logger = createLogger(options.verbose);
     const capDebugger = new CAPDebugger(logger);
+    const commandExecutor = new CommandExecutor(logger);
 
     let finalAppName = appName;
     
-    // If no app name provided, show interactive selection
+    // Workspace selection (optional, interactive if multiple)
+    const { listWorkspaces, getWorkspace, touchWorkspaceLastUsed } = await import('../lib/workspaces');
+    const workspaces = listWorkspaces(logger);
+    let workspaceName: string | undefined = options.workspace;
+    let workspaceCfHomeDir: string | undefined;
+
+    if (workspaceName) {
+      const ws = getWorkspace(workspaceName, logger);
+      if (!ws) {
+        logger.error(`Workspace '${workspaceName}' not found. Use: cds-debug workspace list`);
+        process.exit(1);
+      }
+      workspaceCfHomeDir = ws.cfHomeDir;
+      touchWorkspaceLastUsed(workspaceName, logger);
+    } else if (workspaces.length === 1) {
+      workspaceName = workspaces[0].name;
+      workspaceCfHomeDir = workspaces[0].cfHomeDir;
+      touchWorkspaceLastUsed(workspaceName, logger);
+    } else if (workspaces.length > 1) {
+      const { selectedWorkspace } = await inquirer.prompt([
+        {
+          type: 'list',
+          name: 'selectedWorkspace',
+          message: 'Select a workspace (CF target):',
+          choices: [
+            ...workspaces.map(w => ({
+              name: `${w.name}${w.org && w.space ? ` (${w.org} / ${w.space})` : ''}`,
+              value: w.name
+            })),
+            { name: '+ Add new workspace', value: '__add__' }
+          ]
+        }
+      ]);
+
+      if (selectedWorkspace === '__add__') {
+        logger.error('No workspace available yet. Run: cds-debug workspace add');
+        process.exit(1);
+      }
+
+      workspaceName = selectedWorkspace as string;
+      const ws = getWorkspace(workspaceName, logger);
+      workspaceCfHomeDir = ws?.cfHomeDir;
+      touchWorkspaceLastUsed(workspaceName, logger);
+    } else {
+      // No workspaces configured yet
+      logger.error('No workspaces configured. Run: cds-debug workspace add');
+      process.exit(1);
+    }
+
+    // If no app name provided, show interactive selection (inside chosen workspace)
     if (!finalAppName) {
       try {
-        const cfClient = new (await import('../lib/cloudfoundry')).CloudFoundryClient(logger);
+        const { CloudFoundryClient } = await import('../lib/cloudfoundry');
+        const cfEnv = workspaceCfHomeDir ? { CF_HOME: workspaceCfHomeDir } : undefined;
+        const cfClient = new CloudFoundryClient(logger, cfEnv, workspaceName);
         const apps = await cfClient.getApps();
         
         if (apps.length === 0) {
@@ -82,7 +136,7 @@ For more information, visit: https://github.com/HatriGt/sap-cap-debugger
     } else {
       // Auto-assign port
       logger.loading('Assigning debug port...');
-      debugPort = await portManager.getPortForApp(finalAppName);
+      debugPort = await portManager.getPortForApp(finalAppName, workspaceName);
       logger.stopLoading();
       if (debugPort !== 9229) {
         logger.info(`Using port ${debugPort} for ${finalAppName}`);
@@ -91,6 +145,8 @@ For more information, visit: https://github.com/HatriGt/sap-cap-debugger
 
     const config: DebugConfig = {
       appName: finalAppName,
+      workspaceName,
+      workspaceCfHomeDir,
       debugPort: debugPort,
       debuggerType: options.debugger as DebuggerType,
       autoCleanup: false,
@@ -99,6 +155,136 @@ For more information, visit: https://github.com/HatriGt/sap-cap-debugger
 
     const success = await capDebugger.setupDebugging(config);
     process.exit(success ? 0 : 1);
+  });
+
+// Workspace management
+const workspaceCmd = program
+  .command('workspace')
+  .description('Manage Cloud Foundry workspaces (isolated CF targets)')
+  .addHelpText('after', `
+Examples:
+  $ cds-debug workspace list
+  $ cds-debug workspace add
+  $ cds-debug workspace remove pp
+  `);
+
+workspaceCmd
+  .command('list')
+  .description('List configured workspaces')
+  .option('-v, --verbose', 'Enable verbose logging', false)
+  .action(async (options) => {
+    const logger = createLogger(options.verbose);
+    const { listWorkspaces } = await import('../lib/workspaces');
+    const workspaces = listWorkspaces(logger);
+    if (workspaces.length === 0) {
+      logger.info('No workspaces configured. Run: cds-debug workspace add');
+      return;
+    }
+    console.log('');
+    logger.info('Workspaces:');
+    for (const w of workspaces) {
+      const orgSpace = w.org && w.space ? `${w.org} / ${w.space}` : '';
+      const api = options.verbose && w.apiUrl ? `@ ${w.apiUrl}` : '';
+      const meta = `${api} ${orgSpace}`.trim();
+      console.log(`  • ${w.name}${meta ? ` (${meta})` : ''}`);
+    }
+    console.log('');
+  });
+
+workspaceCmd
+  .command('add')
+  .description('Add a new workspace (logs into a CF target)')
+  .option('-v, --verbose', 'Enable verbose logging', false)
+  .action(async (options) => {
+    const logger = createLogger(options.verbose);
+    const { isValidWorkspaceName, getWorkspace, upsertWorkspace, createWorkspaceSkeleton } = await import('../lib/workspaces');
+    const commandExecutor = new CommandExecutor(logger);
+
+    const answers = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'workspaceName',
+        message: 'Workspace name (e.g. pp, qa, prod-eu10):',
+        validate: (v: string) => isValidWorkspaceName(v) || 'Use 1-48 chars: letters, numbers, dot, dash, underscore'
+      },
+      {
+        type: 'input',
+        name: 'apiUrl',
+        message: 'CF API endpoint (e.g. https://api.cf.eu10-xxx.hana.ondemand.com):',
+        validate: (v: string) => !!v.trim() || 'API endpoint is required'
+      },
+      {
+        type: 'list',
+        name: 'loginMethod',
+        message: 'Login method:',
+        choices: [
+          { name: 'Standard (cf login)', value: 'standard' },
+          { name: 'SSO (cf login --sso)', value: 'sso' }
+        ],
+        default: 'standard'
+      }
+    ]);
+
+    const workspaceName = answers.workspaceName as string;
+    if (getWorkspace(workspaceName, logger)) {
+      logger.error(`Workspace '${workspaceName}' already exists.`);
+      process.exit(1);
+    }
+
+    const ws = createWorkspaceSkeleton(workspaceName);
+    ws.apiUrl = answers.apiUrl;
+    ws.loginMethod = answers.loginMethod;
+    upsertWorkspace(ws, logger);
+
+    const env = { ...process.env, CF_HOME: ws.cfHomeDir };
+
+    // Configure API then login interactively
+    const apiResult = await commandExecutor.execute('cf', ['api', ws.apiUrl!], { env });
+    if (!apiResult.success) {
+      logger.error(`Failed to set CF API: ${apiResult.output || apiResult.error}`);
+      process.exit(1);
+    }
+
+    const loginArgs = ws.loginMethod === 'sso' ? ['login', '--sso'] : ['login'];
+    const loginResult = await commandExecutor.executeWithOutput('cf', loginArgs, { env });
+    if (!loginResult.success) {
+      logger.error(`Login failed: ${loginResult.error}`);
+      process.exit(1);
+    }
+
+    // Capture target metadata for display
+    const targetResult = await commandExecutor.execute('cf', ['target'], { env });
+    if (targetResult.success) {
+      const lines = targetResult.output.split('\n');
+      for (const line of lines) {
+        const mApi = line.match(/api endpoint:\s*(.+)\s*/i);
+        const mOrg = line.match(/org:\s*(.+)\s*/i);
+        const mSpace = line.match(/space:\s*(.+)\s*/i);
+        if (mApi?.[1]) ws.apiUrl = mApi[1].trim();
+        if (mOrg?.[1]) ws.org = mOrg[1].trim();
+        if (mSpace?.[1]) ws.space = mSpace[1].trim();
+      }
+      upsertWorkspace(ws, logger);
+    }
+
+    logger.success(`Workspace '${ws.name}' added.`);
+  });
+
+workspaceCmd
+  .command('remove')
+  .description('Remove a workspace')
+  .argument('<name>', 'Workspace name')
+  .option('-v, --verbose', 'Enable verbose logging', false)
+  .action(async (name, options) => {
+    const logger = createLogger(options.verbose);
+    const { getWorkspace, removeWorkspace } = await import('../lib/workspaces');
+    const ws = getWorkspace(name, logger);
+    if (!ws) {
+      logger.error(`Workspace '${name}' not found.`);
+      process.exit(1);
+    }
+    removeWorkspace(name, logger);
+    logger.success(`Workspace '${name}' removed (metadata only).`);
   });
 
 // Add subcommands
@@ -117,7 +303,25 @@ Examples:
     const capDebugger = new CAPDebugger(logger);
     
     if (appName) {
-      await capDebugger.cleanup(appName);
+      // If multiple workspaces have the same app name, ask which one to clean.
+      const sessions = capDebugger.getAllSessions().filter(s => s.appName === appName);
+      if (sessions.length > 1) {
+        const { selected } = await inquirer.prompt([
+          {
+            type: 'list',
+            name: 'selected',
+            message: `Multiple sessions found for '${appName}'. Which one to clean?`,
+            choices: sessions.map(s => ({
+              name: `${s.workspaceName ? `[${s.workspaceName}] ` : ''}${s.appName} (port ${s.debugPort})`,
+              value: `${s.workspaceName || ''}::${s.appName}`
+            }))
+          }
+        ]);
+        const [wsName] = (selected as string).split('::');
+        await capDebugger.cleanup(appName, wsName || undefined);
+      } else {
+        await capDebugger.cleanup(appName, sessions[0]?.workspaceName);
+      }
     } else {
       // Interactive cleanup
       logger.loading('Loading sessions...');
@@ -137,10 +341,11 @@ Examples:
       
       for (const session of sessions) {
         const isActive = await portManager.isPortInUse(session.debugPort);
+        const key = `${session.workspaceName || ''}::${session.appName}`;
         if (isActive) {
-          activeSessions.push(session.appName);
+          activeSessions.push(key);
         } else {
-          inactiveSessions.push(session.appName);
+          inactiveSessions.push(key);
         }
       }
       logger.stopLoading();
@@ -154,11 +359,11 @@ Examples:
       const choices = [
         { name: 'Clean up all sessions', value: '__all__' },
         ...sessions.map(s => {
-          const isActive = activeSessions.includes(s.appName);
+          const isActive = activeSessions.includes(`${s.workspaceName || ''}::${s.appName}`);
           const status = isActive ? '[Active]' : '[Inactive]';
           return {
-            name: `${status} ${s.appName} (port ${s.debugPort})`,
-            value: s.appName
+            name: `${status} ${s.workspaceName ? `[${s.workspaceName}] ` : ''}${s.appName} (port ${s.debugPort})`,
+            value: `${s.workspaceName || ''}::${s.appName}`
           };
         })
       ];
@@ -185,8 +390,9 @@ Examples:
           logger.info('Cleaning up all sessions...');
           await capDebugger.cleanup();
         } else {
-          logger.info(`Cleaning up ${selected}...`);
-          await capDebugger.cleanup(selected);
+          const [wsName, selectedApp] = (selected as string).split('::');
+          logger.info(`Cleaning up ${selectedApp}${wsName ? ` (workspace: ${wsName})` : ''}...`);
+          await capDebugger.cleanup(selectedApp, wsName || undefined);
         }
       } catch (error: any) {
         // Handle Ctrl+C gracefully

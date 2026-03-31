@@ -4,9 +4,11 @@ import { Logger } from '../types';
 export class SSHTunnelManager {
   private logger: Logger;
   private tunnelProcesses: Map<number, any> = new Map(); // Map<port, process>
+  private cfEnv?: Record<string, string>;
 
-  constructor(logger: Logger) {
+  constructor(logger: Logger, cfEnv?: Record<string, string>) {
     this.logger = logger;
+    this.cfEnv = cfEnv;
   }
 
   async createTunnel(appName: string, localPort: number, remotePort: number): Promise<boolean> {
@@ -34,6 +36,7 @@ export class SSHTunnelManager {
         const tunnelProcess = spawn('cf', [
           'ssh', '-N', '-T', '-L', `${localPort}:127.0.0.1:${remotePort}`, appName
         ], {
+          env: this.cfEnv ? { ...process.env, ...this.cfEnv } : process.env,
           stdio: ['ignore', 'pipe', 'pipe'],
           detached: false
         });

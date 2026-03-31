@@ -4,6 +4,8 @@ import { SSHTunnelManager } from './ssh-tunnel';
 import { DebuggerLauncher } from './debugger-launcher';
 import { DebugConfig, DebugSession, Logger, AppStatus } from '../types';
 import * as readline from 'readline';
+import { AuthExpiredError } from './cloudfoundry';
+import { getWorkspace, touchWorkspaceLastUsed } from './workspaces';
 
 export class CAPDebugger {
   private cfClient: CloudFoundryClient;
@@ -22,6 +24,19 @@ export class CAPDebugger {
   }
 
   async setupDebugging(config: DebugConfig): Promise<boolean> {
+    return await this.setupDebuggingInner(config, false);
+  }
+
+  private async setupDebuggingInner(config: DebugConfig, retriedAuth: boolean): Promise<boolean> {
+    // Ensure CF operations and tunnel use the selected workspace CF_HOME (if any)
+    const cfHomeDir = config.workspaceCfHomeDir || (config.workspaceName ? getWorkspace(config.workspaceName, this.logger)?.cfHomeDir : undefined);
+    const cfEnv = cfHomeDir ? { CF_HOME: cfHomeDir } : undefined;
+    this.cfClient = new CloudFoundryClient(this.logger, cfEnv, config.workspaceName);
+    this.sshTunnel = new SSHTunnelManager(this.logger, cfEnv);
+    if (config.workspaceName) {
+      touchWorkspaceLastUsed(config.workspaceName, this.logger);
+    }
+
     try {
       // Check prerequisites
       if (!await this.cfClient.checkPrerequisites()) {
@@ -85,10 +100,10 @@ export class CAPDebugger {
       }
 
       // Cleanup any existing debugging session for this app first
-      const existingSession = this.portManager.getSession(config.appName);
+      const existingSession = this.portManager.getSession(config.appName, config.workspaceName);
       if (existingSession) {
         this.logger.info(`Cleaning up existing session for ${config.appName}...`);
-        await this.cleanup(config.appName);
+        await this.cleanup(config.appName, config.workspaceName);
         // Wait a moment for processes to fully terminate
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
@@ -99,7 +114,7 @@ export class CAPDebugger {
       // Check if port is in use and clean it up if needed
       if (await this.portManager.isPortInUse(debugPort)) {
         // Check if it's our own session
-        const existingSession = this.portManager.getSession(config.appName);
+        const existingSession = this.portManager.getSession(config.appName, config.workspaceName);
         if (existingSession && existingSession.debugPort === debugPort) {
           // This is our session, it will be cleaned up above
           this.logger.debug(`Port ${debugPort} is in use by existing session for ${config.appName}`);
@@ -204,6 +219,7 @@ export class CAPDebugger {
       // Create session record
       this.currentSession = {
         appName: config.appName,
+        workspaceName: config.workspaceName,
         nodePid: nodeProcess.pid,
         sshTunnelPid: 0, // We don't track this in the current implementation
         appProcessPid: 0, // We don't track this in the current implementation
@@ -218,30 +234,57 @@ export class CAPDebugger {
       return true;
 
     } catch (error) {
+      if (error instanceof AuthExpiredError) {
+        const wsName = error.workspaceName || config.workspaceName;
+        if (wsName && !retriedAuth) {
+          const ws = getWorkspace(wsName, this.logger);
+          const loginMethod = ws?.loginMethod || 'standard';
+          this.logger.warning(`Cloud Foundry session expired for workspace '${wsName}'`);
+          const { confirm } = await this.askForConfirmation('Re-login now? (y/N): ');
+          if (!confirm) {
+            this.logger.error('Cannot continue without Cloud Foundry login.');
+            return false;
+          }
+
+          // Interactive re-login using the selected workspace CF_HOME
+          this.logger.loading('Re-authenticating with Cloud Foundry...');
+          const reauthResult = await this.cfClient.login(loginMethod);
+          this.logger.stopLoading();
+          if (!reauthResult?.success) {
+            this.logger.error('Re-login failed.');
+            return false;
+          }
+
+          // Retry once
+          return await this.setupDebuggingInner({ ...config }, true);
+        }
+      }
+
       this.logger.error(`Setup failed: ${error}`);
       return false;
     }
   }
 
-  async cleanup(appName?: string): Promise<void> {
+  async cleanup(appName?: string, workspaceName?: string): Promise<void> {
     if (appName) {
       // Cleanup specific app
       this.logger.loading(`Cleaning up debugging session for ${appName}...`);
       
-      const session = this.portManager.getSession(appName);
+      const session = this.portManager.getSession(appName, workspaceName);
       if (session) {
         // Kill the SSH tunnel for this specific port
         await this.sshTunnel.killTunnel(session.debugPort);
         await this.portManager.cleanupPort(session.debugPort);
-        this.portManager.removeSession(appName);
-        if (this.currentSession && this.currentSession.appName === appName) {
+        this.portManager.removeSession(appName, workspaceName);
+        if (this.currentSession && this.currentSession.appName === appName && (this.currentSession.workspaceName || '') === (workspaceName || '')) {
           this.currentSession = null;
         }
         this.logger.stopLoading();
-        this.logger.success(`Cleanup complete for ${appName}!`);
+        const wsLabel = workspaceName ? ` (workspace: ${workspaceName})` : '';
+        this.logger.success(`Cleanup complete for ${appName}${wsLabel}!`);
       } else {
         this.logger.stopLoading();
-        this.logger.warning(`No active session found for ${appName}`);
+        this.logger.warning(`No active session found for ${appName}${workspaceName ? ` in workspace ${workspaceName}` : ''}`);
       }
     } else {
       // Cleanup all sessions
@@ -303,7 +346,7 @@ export class CAPDebugger {
       console.log('🟢 Active Debugging Sessions:');
       for (const session of activeSessions) {
         const duration = Math.floor((Date.now() - session.startTime.getTime()) / 1000 / 60);
-        console.log(`  ${session.appName}`);
+        console.log(`  ${session.workspaceName ? `[${session.workspaceName}] ` : ''}${session.appName}`);
         console.log(`    Port: ${session.debugPort}`);
         console.log(`    Node PID: ${session.nodePid}`);
         console.log(`    Started: ${session.startTime.toLocaleString()} (${duration} min ago)`);
@@ -317,7 +360,7 @@ export class CAPDebugger {
       console.log('🔴 Inactive Sessions (stale - can be cleaned up):');
       for (const session of inactiveSessions) {
         const duration = Math.floor((Date.now() - session.startTime.getTime()) / 1000 / 60);
-        console.log(`  ${session.appName}`);
+        console.log(`  ${session.workspaceName ? `[${session.workspaceName}] ` : ''}${session.appName}`);
         console.log(`    Port: ${session.debugPort} (not in use)`);
         console.log(`    Node PID: ${session.nodePid}`);
         console.log(`    Started: ${session.startTime.toLocaleString()} (${duration} min ago)`);
@@ -350,6 +393,9 @@ export class CAPDebugger {
     this.logger.success('🎉 Remote debugging setup complete!');
     console.log('');
     console.log('📋 Debugging Information:');
+    if (config.workspaceName) {
+      console.log(`  • Workspace: ${config.workspaceName}`);
+    }
     console.log(`  • Application: ${config.appName}`);
     console.log(`  • Debug Port: ${config.debugPort}`);
     console.log(`  • Debugger Type: ${config.debuggerType}`);

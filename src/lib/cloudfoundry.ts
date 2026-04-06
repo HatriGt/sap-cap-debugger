@@ -15,8 +15,11 @@ function isCfAuthError(output: string): boolean {
   const text = (output || '').toLowerCase();
   return (
     text.includes('not authenticated') ||
+    text.includes('not logged in') ||
     text.includes('authentication has expired') ||
     text.includes('invalid token') ||
+    text.includes('token expired') ||
+    (text.includes('token') && text.includes('log back in')) ||
     text.includes('unauthorized') ||
     (text.includes('request error') && (text.includes(' 401') || text.includes(' 403'))) ||
     text.includes('status code: 401') ||

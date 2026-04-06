@@ -8,6 +8,7 @@ import { DebugConfig, DebuggerType } from '../types';
 import { PortManager } from '../lib/port-manager';
 import { CommandExecutor } from '../utils/command';
 import pkg from '../../package.json';
+import { AuthExpiredError, CloudFoundryClient } from '../lib/cloudfoundry';
 
 const program = new Command();
 
@@ -98,10 +99,31 @@ For more information, visit: https://github.com/HatriGt/sap-cap-debugger
     // If no app name provided, show interactive selection (inside chosen workspace)
     if (!finalAppName) {
       try {
-        const { CloudFoundryClient } = await import('../lib/cloudfoundry');
         const cfEnv = workspaceCfHomeDir ? { CF_HOME: workspaceCfHomeDir } : undefined;
         const cfClient = new CloudFoundryClient(logger, cfEnv, workspaceName);
-        const apps = await cfClient.getApps();
+
+        let apps;
+        try {
+          apps = await cfClient.getApps();
+        } catch (e) {
+          if (e instanceof AuthExpiredError && workspaceName && workspaceCfHomeDir) {
+            const { getWorkspace } = await import('../lib/workspaces');
+            const ws = getWorkspace(workspaceName, logger);
+            const loginMethod = ws?.loginMethod || 'standard';
+            logger.warning(`Cloud Foundry session expired for workspace '${workspaceName}'`);
+            const { confirm } = await inquirer.prompt([
+              { type: 'confirm', name: 'confirm', message: 'Re-login now?', default: false }
+            ]);
+            if (!confirm) throw e;
+
+            await commandExecutor.executeWithOutput('cf', loginMethod === 'sso' ? ['login', '--sso'] : ['login'], {
+              env: { ...process.env, CF_HOME: workspaceCfHomeDir }
+            });
+            apps = await cfClient.getApps();
+          } else {
+            throw e;
+          }
+        }
         
         if (apps.length === 0) {
           logger.error('No applications found in current space');
@@ -269,6 +291,48 @@ workspaceCmd
     }
 
     logger.success(`Workspace '${ws.name}' added.`);
+  });
+
+workspaceCmd
+  .command('login')
+  .description('Login (or re-login) to a workspace')
+  .argument('<name>', 'Workspace name')
+  .option('-v, --verbose', 'Enable verbose logging', false)
+  .action(async (name, options) => {
+    const logger = createLogger(options.verbose);
+    const { getWorkspace, upsertWorkspace } = await import('../lib/workspaces');
+    const ws = getWorkspace(name, logger);
+    if (!ws) {
+      logger.error(`Workspace '${name}' not found.`);
+      process.exit(1);
+    }
+
+    const commandExecutor = new CommandExecutor(logger);
+    const env = { ...process.env, CF_HOME: ws.cfHomeDir };
+    const loginArgs = ws.loginMethod === 'sso' ? ['login', '--sso'] : ['login'];
+
+    const loginResult = await commandExecutor.executeWithOutput('cf', loginArgs, { env });
+    if (!loginResult.success) {
+      logger.error(`Login failed: ${loginResult.error}`);
+      process.exit(1);
+    }
+
+    // Refresh metadata
+    const targetResult = await commandExecutor.execute('cf', ['target'], { env });
+    if (targetResult.success) {
+      const lines = targetResult.output.split('\n');
+      for (const line of lines) {
+        const mApi = line.match(/api endpoint:\s*(.+)\s*/i);
+        const mOrg = line.match(/org:\s*(.+)\s*/i);
+        const mSpace = line.match(/space:\s*(.+)\s*/i);
+        if (mApi?.[1]) ws.apiUrl = mApi[1].trim();
+        if (mOrg?.[1]) ws.org = mOrg[1].trim();
+        if (mSpace?.[1]) ws.space = mSpace[1].trim();
+      }
+      upsertWorkspace(ws, logger);
+    }
+
+    logger.success(`Workspace '${ws.name}' is logged in.`);
   });
 
 workspaceCmd

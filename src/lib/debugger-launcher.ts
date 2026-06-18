@@ -56,124 +56,50 @@ export class DebuggerLauncher {
     });
   }
 
-  private getDevtoolsBaseUrl(inspectorUrl: string): string | null {
-    const trimmed = inspectorUrl.trim();
-    if (!trimmed.startsWith('devtools://')) return null;
-
-    const withoutQuery = trimmed.split('?')[0];
-    // Some Chrome versions use js_app.html, some use inspector.html. We keep the exact base
-    // returned by Node, just stripping query params (workaround for ERR_INVALID_URL).
-    return withoutQuery || null;
-  }
-
   async launchChromeDebugger(port: number): Promise<void> {
     this.logger.step('Opening Chrome Debugger');
-    
-    // Wait a moment for the debugger to be ready
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
-    try {
-      // Try to fetch the devtoolsFrontendUrl from the inspector JSON endpoint
-      this.logger.loading('Fetching inspector URL...');
-      const inspectorUrl = await this.fetchInspectorUrl(port);
-      this.logger.stopLoading();
-      
-      if (inspectorUrl) {
-        // Node's devtoolsFrontendUrl can be a devtools:// URL. Some Chrome versions refuse
-        // direct navigation to devtools:// with query params (ERR_INVALID_URL). A common
-        // workaround is to open the base devtools page first (no params), then open the
-        // full URL.
-        this.logger.info(`Opening DevTools for port ${port}...`);
-        this.logger.debug(`Inspector URL: ${inspectorUrl}`);
-        
-        const isMac = process.platform === 'darwin';
-        const devtoolsBaseUrl = this.getDevtoolsBaseUrl(inspectorUrl);
-        
-        if (isMac) {
-          try {
-            if (devtoolsBaseUrl) {
-              this.logger.info('Trying direct DevTools open (two-step workaround)...');
-              await execAsync(`open -a "Google Chrome" "${devtoolsBaseUrl}"`);
-              await new Promise(resolve => setTimeout(resolve, 300));
-              await execAsync(`open -a "Google Chrome" "${inspectorUrl}"`);
-              this.logger.success('Chrome DevTools opened directly!');
-              console.log('');
-              this.logger.info('🎉 DevTools should now be open with your debugging session');
-              console.log('');
-              return;
-            }
 
-            // If inspectorUrl isn't devtools://, just open it directly.
-            await execAsync(`open -a "Google Chrome" "${inspectorUrl}"`);
-            this.logger.success('Chrome DevTools opened directly!');
-            console.log('');
-            this.logger.info('🎉 DevTools should now be open with your debugging session');
-            console.log('');
-            return;
-          } catch (error: any) {
-            this.logger.warning(`Could not open with Chrome app: ${error.message}`);
-            this.logger.warning('Falling back to inspector listing page...');
-          }
-        }
+    // Give the inspector a moment, then confirm it's reachable over the tunnel.
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    this.logger.loading('Checking inspector...');
+    const inspectorUrl = await this.fetchInspectorUrl(port);
+    this.logger.stopLoading();
 
-        // Non-macOS (or macOS fallback): attempt the same two-step workaround if devtools://
-        try {
-          if (devtoolsBaseUrl) {
-            this.logger.info('Trying direct DevTools open (two-step workaround)...');
-            await open(devtoolsBaseUrl, { app: { name: 'google chrome' } });
-            await new Promise(resolve => setTimeout(resolve, 300));
-            await open(inspectorUrl, { app: { name: 'google chrome' } });
-            this.logger.success('Chrome DevTools opened directly!');
-            console.log('');
-            this.logger.info('🎉 DevTools should now be open with your debugging session');
-            console.log('');
-            return;
-          }
-
-          await open(inspectorUrl, { app: { name: 'google chrome' } });
-          this.logger.success('Chrome DevTools opened directly!');
-          console.log('');
-          this.logger.info('🎉 DevTools should now be open with your debugging session');
-          console.log('');
-          return;
-        } catch (openError) {
-          this.logger.warning('Could not open DevTools URL directly.');
-          this.logger.warning('Falling back to inspector listing page...');
-        }
-
-        // Last fallback: open the JSON listing page so user can click the link.
-        await open(`http://localhost:${port}/json`);
-        this.logger.info(`Opened http://localhost:${port}/json`);
-        this.logger.info('Please click on the "devtoolsFrontendUrl" link to open DevTools');
-        console.log('');
-        return;
-      }
-      
-      // Fallback to chrome://inspect if we can't fetch the URL
-      this.logger.warning('Could not fetch inspector URL, opening chrome://inspect instead');
-      try {
-        await open('chrome://inspect/#devices', { app: { name: 'google chrome' } });
-        this.logger.success('Chrome debugger opened');
-      } catch (chromeError) {
-        // If that fails, try without specifying the app
-        await open('chrome://inspect/#devices');
-        this.logger.success('Chrome debugger opened');
-      }
-      
-      this.logger.info('🔍 Chrome Debugger Instructions:');
-      console.log('1. Chrome should now be open at chrome://inspect/#devices');
-      console.log(`2. Look for your Node.js process (should show 'localhost:${port}')`);
-      console.log('3. Click the \'inspect\' link next to your process');
-      console.log('4. This will open the Node.js DevTools for debugging');
-      console.log('');
-      console.log(`💡 Alternative: Open http://localhost:${port}/json and click the devtoolsFrontendUrl link`);
-      console.log('');
-    } catch (error) {
-      this.logger.warning('Failed to open Chrome. Please open Chrome manually and:');
-      console.log(`1. Go to http://localhost:${port}/json`);
-      console.log('2. Copy the devtoolsFrontendUrl and open it in Chrome');
-      console.log('3. Or go to chrome://inspect/#devices and configure manually');
+    if (inspectorUrl) {
+      this.logger.success(`Inspector is reachable on localhost:${port}`);
+    } else {
+      this.logger.warning(`Could not confirm the inspector on localhost:${port} yet (it may still be warming up).`);
     }
+
+    // IMPORTANT: do NOT navigate Chrome directly to the devtools:// URL.
+    // Modern Chrome blocks that (ERR_INVALID_URL), and reopening the same URL
+    // just refocuses a stale, disconnected tab. The reliable path is
+    // chrome://inspect, which discovers localhost:<port> and provides a working
+    // "inspect" link that opens a fresh DevTools session every time.
+    try {
+      if (process.platform === 'darwin') {
+        await execAsync('open -a "Google Chrome" "chrome://inspect/#devices"');
+      } else {
+        await open('chrome://inspect/#devices', { app: { name: 'google chrome' } });
+      }
+      this.logger.success('Opened chrome://inspect');
+    } catch {
+      try {
+        await open('chrome://inspect/#devices');
+        this.logger.success('Opened chrome://inspect');
+      } catch {
+        this.logger.warning('Could not open Chrome automatically - open chrome://inspect/#devices manually.');
+      }
+    }
+
+    console.log('');
+    this.logger.info('🔍 In the chrome://inspect tab:');
+    console.log(`  1. Under "Remote Target", find the target on localhost:${port} and click "inspect".`);
+    console.log(`  2. If it is not listed, click "Configure...", add "localhost:${port}",`);
+    console.log(`     keep "Discover network targets" checked, then wait a few seconds.`);
+    console.log('');
+    this.logger.info('Keep this command running - it holds the SSH tunnel open.');
+    console.log('');
   }
 
   async launchVSCodeDebugger(port: number): Promise<void> {

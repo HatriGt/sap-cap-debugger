@@ -1,5 +1,5 @@
 import { CommandExecutor } from '../utils/command';
-import { AppStatus, ProcessInfo, CommandResult } from '../types';
+import { AppStatus, CommandResult } from '../types';
 import { Logger } from '../types';
 
 export class AuthExpiredError extends Error {
@@ -70,11 +70,18 @@ export class CloudFoundryClient {
       return false;
     }
 
+    // Port checks use netstat first and fall back to lsof, so either one is enough.
+    // Don't hard-fail when netstat is missing (it's not installed by default on many
+    // modern systems) as long as lsof is available.
     const netstatExists = await this.commandExecutor.checkCommandExists('netstat');
-    if (!netstatExists) {
+    const lsofExists = await this.commandExecutor.checkCommandExists('lsof');
+    if (!netstatExists && !lsofExists) {
       this.logger.stopLoading();
-      this.logger.error('netstat command is not available');
+      this.logger.error('Neither netstat nor lsof is available; one is required for port checks');
       return false;
+    }
+    if (!netstatExists) {
+      this.logger.debug('netstat not found; falling back to lsof for port checks');
     }
 
     this.logger.stopLoading();
@@ -120,9 +127,9 @@ export class CloudFoundryClient {
 
   async startApp(appName: string): Promise<boolean> {
     this.logger.loading(`Starting application: ${appName}...`);
-    
+
     const result = await this.cf(['start', appName]);
-    
+
     if (result.success) {
       this.logger.stopLoading();
       this.logger.success(`Application ${appName} started successfully`);
@@ -132,6 +139,23 @@ export class CloudFoundryClient {
       this.logger.error(`Failed to start application: ${result.error}`);
       return false;
     }
+  }
+
+  // Full stop+start cycle. Needed to make SSH enablement take effect: enabling
+  // SSH does NOT affect already-running instances, and `cf start` is a no-op
+  // when the app is already started - only `cf restart` cycles the instances so
+  // `cf ssh` becomes authorized.
+  async restartApp(appName: string): Promise<boolean> {
+    this.logger.loading(`Restarting application: ${appName} (so SSH takes effect)...`);
+    // cf restart blocks until the app is up and can take a few minutes.
+    const result = await this.cf(['restart', appName], { timeout: 300000 });
+    this.logger.stopLoading();
+    if (result.success) {
+      this.logger.success(`Application ${appName} restarted`);
+      return true;
+    }
+    this.logger.error(`Failed to restart application: ${result.error || result.output}`);
+    return false;
   }
 
   async enableSSH(appName: string): Promise<boolean> {
@@ -150,219 +174,78 @@ export class CloudFoundryClient {
     }
   }
 
+  // Step 1: read the app-level SSH flag via `cf ssh-enabled`.
   async checkSSHEnabled(appName: string): Promise<boolean> {
-    this.logger.loading(`Checking SSH access for application: ${appName}...`);
-    
+    this.logger.loading(`Checking SSH flag (cf ssh-enabled ${appName})...`);
     const result = await this.cf(['ssh-enabled', appName]);
-    
-    if (result.success) {
-      const output = result.output.toLowerCase().trim();
-      
-      // More flexible pattern matching - check for "enabled" or "true" (not just "ssh is enabled")
-      // Common formats:
-      // - "ssh is enabled"
-      // - "ssh enabled"
-      // - "ssh support is enabled for app '...'."
-      // - "enabled"
-      // - "true" (some CF versions)
-      if (output.includes('enabled') || output.includes('true')) {
-        // Make sure it's not explicitly disabled
-        if (!output.includes('disabled') && !output.includes('false')) {
-          this.logger.stopLoading();
-          this.logger.success('SSH access is already enabled');
-          return true;
-        }
-      }
-      
-      // Explicitly disabled
-      if (output.includes('disabled') || output.includes('false')) {
-        this.logger.stopLoading();
-        this.logger.info('SSH access is disabled');
-        return false;
-      }
-      
-      // Log the actual output for debugging
-      this.logger.debug(`SSH status output: ${result.output}`);
-    }
-    
-    // If we can't determine status, try a direct SSH test
-    this.logger.update('Testing SSH connection...');
-    const sshTest = await this.cf([
-      // -T: disable pseudo-tty allocation (more reliable in non-interactive execution)
-      'ssh', '-T', appName, '-c', 'echo "test"'
-    ], {
-      // First SSH attempt can be slow due to key exchange / initial handshake.
-      timeout: 15000
-    });
-    
-    if (sshTest.success) {
-      this.logger.stopLoading();
-      this.logger.success('SSH access is working (verified by test)');
-      return true;
-    }
-    
-    // If we can't determine status, assume it's disabled
     this.logger.stopLoading();
-    this.logger.warning('Could not determine SSH status, assuming disabled');
+
+    // Output is like: "ssh support is enabled for app 'X'." / "... disabled ...".
+    const output = (result.output || '').toLowerCase();
+    const enabled = result.success && output.includes('enabled') && !output.includes('disabled');
+    this.logger.debug(`cf ssh-enabled output: ${(result.output || '').trim()}`);
+    return enabled;
+  }
+
+  // Step 4: confirm `cf ssh` actually works before we rely on it. Mirrors the
+  // working manual invocation `cf ssh <app> -c '<cmd>'` (no -T). Retries because
+  // the first connection - especially right after enabling SSH - can be slow,
+  // and surfaces the real failure (not authorized / timeout / host key) so it
+  // isn't hidden behind --verbose.
+  async testSSHConnection(appName: string): Promise<boolean> {
+    const marker = '__cds_ssh_ok__';
+    const maxAttempts = 3;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      this.logger.loading(`Testing cf ssh to ${appName}... (attempt ${attempt}/${maxAttempts})`);
+      const sshTest = await this.cf(['ssh', appName, '-c', `echo ${marker}`], { timeout: 60000 });
+      this.logger.stopLoading();
+
+      if (sshTest.success && sshTest.output.includes(marker)) {
+        this.logger.success('cf ssh is working');
+        return true;
+      }
+
+      const detail = (sshTest.output || sshTest.error || '').trim();
+      if (detail) {
+        this.logger.warning(`cf ssh failed: ${detail.split('\n').slice(0, 3).join(' | ')}`);
+      }
+      if (attempt < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 4000));
+      }
+    }
     return false;
   }
 
-  async startAppProcess(appName: string): Promise<CommandResult> {
-    this.logger.loading('Starting application process...');
-    
-    // First, try to detect the correct entry point
-    const entryPoint = await this.detectEntryPoint(appName);
-    this.logger.update('Starting Node.js process...');
-    
-    const command = `export PATH='/home/vcap/deps/0/bin:$PATH' && cd /home/vcap/app && /home/vcap/deps/0/bin/node ${entryPoint}`;
-    
-    const result = await this.cf(['ssh', appName, '-c', command]);
-    this.logger.stopLoading();
-    return result;
-  }
-
-  async detectEntryPoint(appName: string): Promise<string> {
-    this.logger.loading('Detecting application entry point...');
-    
-    // First, try to find server.js files using find command
-    const findResult = await this.cf([
-      'ssh', appName, '-c', 
-      'find /home/vcap/app -maxdepth 3 -name "server.js" -type f 2>/dev/null'
-    ]);
-    
-    if (findResult.success && findResult.output.trim()) {
-      const files = findResult.output.trim().split('\n')
-        .map(f => f.trim().replace('/home/vcap/app/', ''))
-        .filter(f => f.length > 0);
-      
-      if (files.length > 0) {
-        // Prefer root-level, then srv/, then first found
-        const entryPoint = files.find(f => f === 'server.js') || 
-                          files.find(f => f === 'srv/server.js') ||
-                          files[0];
-        
-        this.logger.stopLoading();
-        this.logger.success(`Found entry point: ${entryPoint}`);
-        return entryPoint;
-      }
-    }
-    
-    // Fallback: Check package.json for main entry point
-    this.logger.update('Checking package.json...');
-    const packageJsonResult = await this.cf([
-      'ssh', appName, '-c', 'cat /home/vcap/app/package.json 2>/dev/null | grep -E "\"main\"|\"start\"" | head -5'
-    ]);
-    
-    if (packageJsonResult.success && packageJsonResult.output.trim()) {
-      // Try to extract entry point from package.json
-      const mainMatch = packageJsonResult.output.match(/"main"\s*:\s*"([^"]+)"/);
-      if (mainMatch && mainMatch[1]) {
-        const entryPoint = mainMatch[1];
-        // Verify it exists
-        const verifyResult = await this.cf([
-          'ssh', appName, '-c', `test -f /home/vcap/app/${entryPoint} && echo "exists"`
-        ]);
-        if (verifyResult.success && verifyResult.output.trim() === 'exists') {
-          this.logger.stopLoading();
-          this.logger.success(`Found entry point from package.json: ${entryPoint}`);
-          return entryPoint;
-        }
-      }
-    }
-    
-    // Last resort: Check common locations
-    this.logger.update('Checking common locations...');
-    const commonPaths = ['server.js', 'srv/server.js', 'app/server.js', 'index.js'];
-    for (const entryPoint of commonPaths) {
-      const result = await this.cf([
-        'ssh', appName, '-c', `test -f /home/vcap/app/${entryPoint} && echo "exists"`
-      ]);
-      if (result.success && result.output.trim() === 'exists') {
-        this.logger.stopLoading();
-        this.logger.success(`Found entry point: ${entryPoint}`);
-        return entryPoint;
-      }
-    }
-    
-    // If no entry point found, default to server.js and let it fail with a clear error
-    this.logger.stopLoading();
-    this.logger.warning('Could not detect entry point, defaulting to server.js');
-    return 'server.js';
-  }
-
-  async findNodeProcess(appName: string): Promise<ProcessInfo | null> {
-    const maxAttempts = 10;
-    let attempt = 1;
-
-    while (attempt <= maxAttempts) {
-      this.logger.loading(`Finding Node.js process... (attempt ${attempt}/${maxAttempts})`);
-      const result = await this.cf(['ssh', appName, '-c', 'ps aux | grep node | grep -v grep']);
-      
-      if (result.success && result.output.trim()) {
-        const lines = result.output.trim().split('\n');
-        
-        for (const line of lines) {
-          const parts = line.trim().split(/\s+/);
-          if (parts.length >= 11 && parts[10] && parts[10].includes('node')) {
-            const pid = parseInt(parts[1]);
-            if (!isNaN(pid)) {
-              this.logger.stopLoading();
-              this.logger.success(`Found Node.js process with PID: ${pid}`);
-              return {
-                pid,
-                name: parts[10],
-                command: line
-              };
-            }
-          }
-        }
-      }
-
-      this.logger.stopLoading();
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      attempt++;
-    }
-
-    this.logger.stopLoading();
-    this.logger.error('Could not find Node.js process after maximum attempts');
-    return null;
-  }
-
   async enableDebugging(appName: string, pid: number, debugPort?: number): Promise<boolean> {
-    this.logger.loading(`Enabling debugging on process ${pid}...`);
-    
-    // Note: kill -USR1 always enables inspector on port 9229 on the remote side
-    // The debugPort parameter is the LOCAL port, not the remote port
-    // The SSH tunnel forwards local port -> remote port 9229
-    
-    // Check if inspector is already running on the remote side (always port 9229)
-    this.logger.update('Checking if inspector is already running...');
-    const checkResult = await this.cf([
-      'ssh', appName, '-c',
-      `netstat -an 2>/dev/null | grep 9229 || ss -an 2>/dev/null | grep 9229 || echo "not found"`
-    ]);
-    
-    if (checkResult.success && checkResult.output.includes('9229')) {
-      this.logger.stopLoading();
-      this.logger.success('Debugging already enabled on port 9229');
-      return true;
-    }
-    
-    // Use kill -USR1 to enable debugging (always uses port 9229 on remote side)
-    const result = await this.cf(['ssh', appName, '-c', `kill -USR1 ${pid}`]);
-    
+    this.logger.loading('Enabling debugging (kill -USR1) on Node.js process(es)...');
+    this.logger.debug(`Detected primary Node.js PID ${pid}; signalling all node processes via pgrep`);
+
+    // Mirror the proven manual command exactly:
+    //   cf ssh <app> -c 'kill -USR1 $(pgrep node)'
+    //
+    // We deliberately signal EVERY Node.js process via `pgrep node` rather than a
+    // single guessed PID. CAP containers commonly run more than one node process
+    // (a launcher/parent plus the actual server worker); signalling only one can
+    // miss the process that serves requests, so the inspector never opens on 9229
+    // and DevTools attaches to a tunnel with no live inspector behind it
+    // ("disconnected"). Sending USR1 to a process that is already inspecting is a
+    // harmless no-op, so signalling all of them is safe.
+    //
+    // kill -USR1 always enables the inspector on remote port 9229; the SSH tunnel
+    // forwards the local debugPort to that remote 9229.
+    const result = await this.cf(['ssh', appName, '-c', 'kill -USR1 $(pgrep node)']);
+
     if (result.success) {
       this.logger.stopLoading();
+      this.logger.success('Debugging enabled on Node.js process(es) (remote port 9229)');
       if (debugPort && debugPort !== 9229) {
-        this.logger.info(`Debugging enabled on remote port 9229`);
         this.logger.info(`SSH tunnel forwards local port ${debugPort} -> remote port 9229`);
-      } else {
-        this.logger.success(`Debugging enabled on process ${pid} (port 9229)`);
       }
       return true;
     } else {
       this.logger.stopLoading();
-      this.logger.error('Failed to enable debugging');
+      this.logger.error(`Failed to enable debugging: ${result.error || result.output || 'unknown error'}`);
       return false;
     }
   }

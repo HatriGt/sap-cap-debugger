@@ -47,9 +47,18 @@ For more information, visit: https://github.com/HatriGt/sap-cap-debugger
 
     let finalAppName = appName;
     
-    // Workspace selection (optional, interactive if multiple)
+    // Workspace selection.
+    //
+    // Workspaces are OPTIONAL and opt-in. By default (no --workspace) we use the
+    // AMBIENT cf login - the same `~/.cf` session your normal `cf ssh` uses - so
+    // the tool behaves exactly like running the cf commands yourself.
+    //
+    // Forcing an isolated CF_HOME workspace previously broke `cf ssh` with
+    // "You are not authorized to perform the requested action" whenever that
+    // workspace's token wasn't SSH-authorized, even though the user's real cf
+    // login worked. So we only switch CF_HOME when a workspace is explicitly
+    // requested via --workspace <name>.
     const { listWorkspaces, getWorkspace, touchWorkspaceLastUsed } = await import('../lib/workspaces');
-    const workspaces = listWorkspaces(logger);
     let workspaceName: string | undefined = options.workspace;
     let workspaceCfHomeDir: string | undefined;
 
@@ -61,39 +70,13 @@ For more information, visit: https://github.com/HatriGt/sap-cap-debugger
       }
       workspaceCfHomeDir = ws.cfHomeDir;
       touchWorkspaceLastUsed(workspaceName, logger);
-    } else if (workspaces.length === 1) {
-      workspaceName = workspaces[0].name;
-      workspaceCfHomeDir = workspaces[0].cfHomeDir;
-      touchWorkspaceLastUsed(workspaceName, logger);
-    } else if (workspaces.length > 1) {
-      const { selectedWorkspace } = await inquirer.prompt([
-        {
-          type: 'list',
-          name: 'selectedWorkspace',
-          message: 'Select a workspace (CF target):',
-          choices: [
-            ...workspaces.map(w => ({
-              name: `${w.name}${w.org && w.space ? ` (${w.org} / ${w.space})` : ''}`,
-              value: w.name
-            })),
-            { name: '+ Add new workspace', value: '__add__' }
-          ]
-        }
-      ]);
-
-      if (selectedWorkspace === '__add__') {
-        logger.error('No workspace available yet. Run: cds-debug workspace add');
-        process.exit(1);
-      }
-
-      workspaceName = selectedWorkspace as string;
-      const ws = getWorkspace(workspaceName, logger);
-      workspaceCfHomeDir = ws?.cfHomeDir;
-      touchWorkspaceLastUsed(workspaceName, logger);
+      logger.info(`Using workspace '${workspaceName}' (CF_HOME: ${workspaceCfHomeDir})`);
     } else {
-      // No workspaces configured yet
-      logger.error('No workspaces configured. Run: cds-debug workspace add');
-      process.exit(1);
+      // No --workspace: use the current/ambient cf login.
+      const workspaces = listWorkspaces(logger);
+      if (workspaces.length > 0) {
+        logger.info('Using your current cf login. To use a saved workspace, pass --workspace <name>.');
+      }
     }
 
     // If no app name provided, show interactive selection (inside chosen workspace)
@@ -177,7 +160,21 @@ For more information, visit: https://github.com/HatriGt/sap-cap-debugger
     };
 
     const success = await capDebugger.setupDebugging(config);
-    process.exit(success ? 0 : 1);
+    if (!success) {
+      process.exit(1);
+    }
+
+    // IMPORTANT: do NOT exit on success. The SSH tunnel runs as a child process
+    // of this CLI; if we exit, the tunnel dies and DevTools immediately shows
+    // "WebSocket disconnected". Stay alive (like a foreground `cf ssh -N -L`)
+    // so the tunnel keeps serving until the user presses Ctrl+C (handled by the
+    // SIGINT handler below, which reminds them to run cleanup).
+    console.log('');
+    console.log('🔌 Tunnel is open. Press Ctrl+C here to stop debugging (then run cleanup).');
+    // Explicitly keep the event loop alive (a pending promise alone would not),
+    // so the child SSH tunnel keeps running until the user presses Ctrl+C.
+    setInterval(() => { /* hold the process open */ }, 1 << 30);
+    await new Promise<void>(() => { /* never resolves */ });
   });
 
 // Workspace management

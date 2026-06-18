@@ -43,24 +43,41 @@ export class CAPDebugger {
         return false;
       }
 
-      // Verify app status
-      this.logger.loading('Checking application status...');
+      // Verify the app exists in the current target
+      this.logger.loading('Checking application...');
       const apps = await this.cfClient.getApps();
-      const appStatus = apps.find(app => app.name === config.appName) || null;
+      let appStatus = apps.find(app => app.name === config.appName) || null;
       this.logger.stopLoading();
-      
+
       if (!appStatus) {
         this.logger.error(`Application '${config.appName}' not found in current space`);
         await this.showAvailableApps();
         return false;
       }
 
-      if (appStatus.status !== 'started') {
-        this.logger.warning(`Application '${config.appName}' is not started (status: ${appStatus.status})`);
+      // STEP 1: check the SSH flag (cf ssh-enabled).
+      // STEP 2: if not enabled, run cf enable-ssh and wait ~10s for it to apply.
+      const sshFlagEnabled = await this.cfClient.checkSSHEnabled(config.appName);
+      if (!sshFlagEnabled) {
+        this.logger.info(`SSH is not enabled. Running 'cf enable-ssh ${config.appName}'...`);
+        await this.cfClient.enableSSH(config.appName);
+        this.logger.loading('Waiting for SSH to take effect...');
+        await new Promise(resolve => setTimeout(resolve, 10000));
+        this.logger.stopLoading();
+      } else {
+        this.logger.success(`SSH is enabled for '${config.appName}'`);
+      }
+
+      // STEP 3: make sure the application is started.
+      this.logger.loading('Checking application status...');
+      appStatus = await this.cfClient.getAppStatus(config.appName);
+      this.logger.stopLoading();
+      if (!appStatus || appStatus.status !== 'started') {
+        this.logger.warning(`Application '${config.appName}' is not started (status: ${appStatus?.status ?? 'unknown'})`);
         this.logger.loading('Starting the application...');
         if (!await this.cfClient.startApp(config.appName)) {
           this.logger.stopLoading();
-          this.logger.error('Failed to start application. Check logs with: cf logs ' + config.appName + ' --recent');
+          this.logger.error(`Failed to start application. Check logs with: cf logs ${config.appName} --recent`);
           return false;
         }
         this.logger.stopLoading();
@@ -68,142 +85,59 @@ export class CAPDebugger {
         this.logger.success(`Application '${config.appName}' is running`);
       }
 
-      // Check and enable SSH access (verified by an actual cf ssh test).
-      let sshEnabled = await this.cfClient.checkSSHEnabled(config.appName);
-      if (!sshEnabled) {
-        this.logger.info('SSH is not authorized for cf ssh yet for this app');
-        this.logger.info(`This will run 'cf enable-ssh ${config.appName}' and restart the app`);
-
-        // Ask user for confirmation
-        const { confirm } = await this.askForConfirmation('Do you want to enable SSH and restart the app? (y/N): ');
-        if (!confirm) {
-          this.logger.error('SSH access is required. Exiting...');
-          return false;
-        }
-
-        // Enable SSH at the app level. Non-fatal: it may already be enabled and
-        // simply need a restart to take effect (cf enable-ssh on an
-        // already-enabled app is a no-op), so we don't bail if this reports
-        // "already enabled".
-        await this.cfClient.enableSSH(config.appName);
-
-        // Restart the app so the SSH change takes effect.
-        if (!await this.cfClient.startApp(config.appName)) {
-          this.logger.error('Failed to restart application after enabling SSH');
-          return false;
-        }
-
-        // Wait for the app to come back, then re-verify with a real cf ssh test.
-        this.logger.loading('Waiting for application to be ready...');
-        await new Promise(resolve => setTimeout(resolve, 8000));
-        this.logger.stopLoading();
-
-        sshEnabled = await this.cfClient.checkSSHEnabled(config.appName);
-        if (!sshEnabled) {
-          this.logger.error('SSH still not available after enabling and restarting.');
-          this.logger.error('If SSH is blocked at the space level, run:');
-          this.logger.error(`  cf allow-space-ssh <your-space>   (then: cf restart ${config.appName})`);
-          return false;
-        }
+      // STEP 4: confirm cf ssh actually works before relying on it.
+      if (!await this.cfClient.testSSHConnection(config.appName)) {
+        this.logger.error(`Cannot open an SSH session to '${config.appName}'.`);
+        this.logger.error('Things to try:');
+        this.logger.error(`  - Restart after enabling SSH:  cf restart ${config.appName}`);
+        this.logger.error(`  - Space-level SSH:             cf allow-space-ssh <your-space>`);
+        this.logger.error(`  - Verify manually:             cf ssh ${config.appName} -c 'echo ok'`);
+        return false;
       }
 
-      // Cleanup any existing debugging session for this app first
+      // Clean up any previous session / stale local port for this app.
       const existingSession = this.portManager.getSession(config.appName, config.workspaceName);
       if (existingSession) {
         this.logger.info(`Cleaning up existing session for ${config.appName}...`);
         await this.cleanup(config.appName, config.workspaceName);
-        // Wait a moment for processes to fully terminate
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
-
-      // Use the port from config (already assigned by CLI or user)
-      const debugPort = config.debugPort;
-      
-      // Check if port is in use and clean it up if needed
-      if (await this.portManager.isPortInUse(debugPort)) {
-        // Check if it's our own session
-        const existingSession = this.portManager.getSession(config.appName, config.workspaceName);
-        if (existingSession && existingSession.debugPort === debugPort) {
-          // This is our session, it will be cleaned up above
-          this.logger.debug(`Port ${debugPort} is in use by existing session for ${config.appName}`);
-        } else {
-          // Try to clean up the port first
-          this.logger.info(`Port ${debugPort} is in use, attempting to clean up...`);
-          await this.portManager.cleanupPort(debugPort);
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          
-          // Check again
-          if (await this.portManager.isPortInUse(debugPort)) {
-            const otherSession = this.portManager.getAllSessions().find(s => s.debugPort === debugPort && s.appName !== config.appName);
-            if (otherSession) {
-              this.logger.error(`Port ${debugPort} is already in use by ${otherSession.appName}`);
-              return false;
-            } else {
-              this.logger.warning(`Port ${debugPort} is still in use after cleanup. Proceeding anyway...`);
-            }
-          }
-        }
+      if (await this.portManager.isPortInUse(config.debugPort)) {
+        this.logger.info(`Port ${config.debugPort} is in use, attempting to clean up...`);
+        await this.portManager.cleanupPort(config.debugPort);
+        await new Promise(resolve => setTimeout(resolve, 1500));
       }
 
-      // The application is already running (verified above). We intentionally do NOT
-      // spawn a new Node.js process here. Doing so used to cause two problems:
-      //   1. Entry-point detection ("server.js") could fail -> "entry point not found".
-      //   2. A second/duplicate process meant `kill -USR1` could land on the wrong PID,
-      //      so DevTools attached to a tunnel with no live inspector behind it -> "disconnected".
-      // Instead we mirror the proven manual flow: find the already-running process and
-      // signal it directly (kill -USR1), then tunnel to its inspector on 9229.
+      // The remote inspector always listens on 9229 (that's what kill -USR1
+      // enables), regardless of the local debug port.
+      const remoteInspectorPort = 9229;
 
-      // Find Node.js process (best-effort, for display/session info only).
-      // This is NOT required to debug: the inspector is enabled remotely with
-      // `kill -USR1 $(pgrep node)` (pgrep runs inside the container), exactly
-      // like the proven manual command - which never parses a PID client-side.
-      // So if client-side detection/parsing fails we still proceed.
-      this.logger.loading(`Finding Node.js process for ${config.appName}...`);
-      const nodeProcess = await this.cfClient.findNodeProcess(config.appName);
-      this.logger.stopLoading();
-
-      const nodePid = nodeProcess?.pid ?? 0;
-      if (nodeProcess) {
-        this.logger.info(`Found Node.js process: PID ${nodeProcess.pid} for ${config.appName}`);
-        this.logger.info(`Process command: ${nodeProcess.command.substring(0, 80)}...`);
-      } else {
-        this.logger.warning(`Could not detect a specific Node.js PID for ${config.appName}; proceeding anyway.`);
-        this.logger.info(`Debugging will be enabled on all node processes via 'kill -USR1 $(pgrep node)'.`);
+      // STEP 5a: enable the inspector on the remote node process(es), exactly
+      // like the manual command: cf ssh <app> -c 'kill -USR1 $(pgrep node)'.
+      this.logger.info(`Enabling debugging for ${config.appName}...`);
+      if (!await this.cfClient.enableDebugging(config.appName, 0, config.debugPort)) {
+        this.logger.error(`Failed to enable debugging for ${config.appName}`);
+        return false;
       }
+      this.logger.success(`Debugging enabled for ${config.appName} (remote port ${remoteInspectorPort})`);
 
-      // Create SSH tunnel - forward local port to remote inspector port
-      // IMPORTANT: kill -USR1 always uses port 9229 on the remote side
-      // So we must forward to remote port 9229, not config.debugPort
-      // Each app has its own container, so each has its own inspector on port 9229
-      const remoteInspectorPort = 9229; // kill -USR1 always uses 9229
+      // STEP 5b: open the SSH tunnel, like the manual command:
+      // cf ssh -N -T -L <debugPort>:127.0.0.1:9229 <app>.
       this.logger.loading(`Creating SSH tunnel for ${config.appName}...`);
       this.logger.info(`Tunnel: localhost:${config.debugPort} -> ${config.appName}:${remoteInspectorPort}`);
-      this.logger.info(`Note: Each app has its own inspector on port ${remoteInspectorPort} in its own container`);
       const tunnelCreated = await this.sshTunnel.createTunnel(config.appName, config.debugPort, remoteInspectorPort);
       this.logger.stopLoading();
-      
+
       if (!tunnelCreated) {
         this.logger.error(`Failed to create SSH tunnel for ${config.appName} on port ${config.debugPort}`);
         this.logger.error('This might be due to:');
         this.logger.error('  - Cloud Foundry SSH connection limit');
         this.logger.error('  - Network connectivity issues');
-        this.logger.error('  - Authentication problems');
         this.logger.error(`Try running: cf ssh ${config.appName} -c 'echo test' to verify SSH access`);
         return false;
       }
 
       this.logger.success(`SSH tunnel created: localhost:${config.debugPort} -> ${config.appName}:${remoteInspectorPort}`);
-      this.logger.info(`This tunnel connects to ${config.appName}'s inspector on remote port ${remoteInspectorPort}`);
-
-      // Enable debugging on the remote node process(es).
-      // Note: kill -USR1 always enables inspector on port 9229 on the remote side
-      this.logger.info(`Enabling debugging for ${config.appName}...`);
-      if (!await this.cfClient.enableDebugging(config.appName, nodePid, config.debugPort)) {
-        this.logger.error(`Failed to enable debugging for ${config.appName}`);
-        return false;
-      }
-
-      this.logger.success(`Debugging enabled for ${config.appName} (remote port ${remoteInspectorPort})`);
 
       // Wait a moment for tunnel to fully establish
       await new Promise(resolve => setTimeout(resolve, 3000));
@@ -227,7 +161,7 @@ export class CAPDebugger {
       this.currentSession = {
         appName: config.appName,
         workspaceName: config.workspaceName,
-        nodePid: nodePid,
+        nodePid: 0,
         sshTunnelPid: 0, // We don't track this in the current implementation
         appProcessPid: 0, // We don't track this in the current implementation
         debugPort: config.debugPort,

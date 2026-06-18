@@ -127,9 +127,9 @@ export class CloudFoundryClient {
 
   async startApp(appName: string): Promise<boolean> {
     this.logger.loading(`Starting application: ${appName}...`);
-    
+
     const result = await this.cf(['start', appName]);
-    
+
     if (result.success) {
       this.logger.stopLoading();
       this.logger.success(`Application ${appName} started successfully`);
@@ -139,6 +139,23 @@ export class CloudFoundryClient {
       this.logger.error(`Failed to start application: ${result.error}`);
       return false;
     }
+  }
+
+  // Full stop+start cycle. Needed to make SSH enablement take effect: enabling
+  // SSH does NOT affect already-running instances, and `cf start` is a no-op
+  // when the app is already started - only `cf restart` cycles the instances so
+  // `cf ssh` becomes authorized.
+  async restartApp(appName: string): Promise<boolean> {
+    this.logger.loading(`Restarting application: ${appName} (so SSH takes effect)...`);
+    // cf restart blocks until the app is up and can take a few minutes.
+    const result = await this.cf(['restart', appName], { timeout: 300000 });
+    this.logger.stopLoading();
+    if (result.success) {
+      this.logger.success(`Application ${appName} restarted`);
+      return true;
+    }
+    this.logger.error(`Failed to restart application: ${result.error || result.output}`);
+    return false;
   }
 
   async enableSSH(appName: string): Promise<boolean> {

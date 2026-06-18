@@ -56,14 +56,12 @@ export class CAPDebugger {
       }
 
       // STEP 1: check the SSH flag (cf ssh-enabled).
-      // STEP 2: if not enabled, run cf enable-ssh and wait ~10s for it to apply.
+      // STEP 2: if not enabled, run cf enable-ssh. (The restart in STEP 4 is what
+      // actually makes it take effect, so we don't wait here.)
       const sshFlagEnabled = await this.cfClient.checkSSHEnabled(config.appName);
       if (!sshFlagEnabled) {
         this.logger.info(`SSH is not enabled. Running 'cf enable-ssh ${config.appName}'...`);
         await this.cfClient.enableSSH(config.appName);
-        this.logger.loading('Waiting for SSH to take effect...');
-        await new Promise(resolve => setTimeout(resolve, 10000));
-        this.logger.stopLoading();
       } else {
         this.logger.success(`SSH is enabled for '${config.appName}'`);
       }
@@ -85,13 +83,26 @@ export class CAPDebugger {
         this.logger.success(`Application '${config.appName}' is running`);
       }
 
-      // STEP 4: confirm cf ssh actually works before relying on it.
-      if (!await this.cfClient.testSSHConnection(config.appName)) {
-        this.logger.error(`Cannot open an SSH session to '${config.appName}'.`);
-        this.logger.error('Things to try:');
-        this.logger.error(`  - Restart after enabling SSH:  cf restart ${config.appName}`);
-        this.logger.error(`  - Space-level SSH:             cf allow-space-ssh <your-space>`);
-        this.logger.error(`  - Verify manually:             cf ssh ${config.appName} -c 'echo ok'`);
+      // STEP 4: confirm cf ssh actually works. If it doesn't, the app must be
+      // restarted for SSH enablement to take effect on the already-running
+      // instances - this is the step that was missing. We restart (cf restart,
+      // a real stop+start) and re-test, exactly like doing it by hand.
+      let sshWorks = await this.cfClient.testSSHConnection(config.appName);
+      if (!sshWorks) {
+        this.logger.warning('cf ssh is not authorized yet - restarting the app so SSH takes effect...');
+        if (!await this.cfClient.restartApp(config.appName)) {
+          this.logger.error(`Failed to restart '${config.appName}'.`);
+          return false;
+        }
+        // Give the SSH proxy a moment after the restart, then re-test.
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        sshWorks = await this.cfClient.testSSHConnection(config.appName);
+      }
+      if (!sshWorks) {
+        this.logger.error(`Cannot open an SSH session to '${config.appName}' even after a restart.`);
+        this.logger.error('If SSH is blocked at the space level, run:');
+        this.logger.error(`  cf allow-space-ssh <your-space>   (then retry)`);
+        this.logger.error(`Verify manually: cf ssh ${config.appName} -c 'echo ok'`);
         return false;
       }
 

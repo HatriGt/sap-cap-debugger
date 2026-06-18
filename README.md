@@ -5,9 +5,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/node/v/sap-cap-debugger.svg)](https://nodejs.org/)
 
-> Professional NPX tool for remote debugging SAP CAP applications on Cloud Foundry
+> **Remote debug SAP CAP (Node.js) apps running on SAP BTP Cloud Foundry — in one command.** Attach **Chrome DevTools** or **VS Code** to a live container over `cf ssh`, with automatic port assignment, multi-app debugging, and multi-space (SSO) workspaces.
 
-A production-ready solution for debugging SAP Cloud Application Programming (CAP) applications deployed on SAP Business Technology Platform (BTP) Cloud Foundry. This tool simplifies remote debugging setup with automatic port assignment, multi-app support, and direct Chrome DevTools / VS Code attach.
+`npx sap-cap-debugger my-app` (or `cds-debug my-app`) gets you from "my CAP service is misbehaving in the cloud" to a breakpoint in your editor — no redeploy, no code changes, no manual SSH tunnels.
+
+A production-ready solution for **remote debugging SAP Cloud Application Programming (CAP) applications** deployed on **SAP Business Technology Platform (BTP) Cloud Foundry**. This tool simplifies remote debugging setup with automatic port assignment, multi-app support, and direct Chrome DevTools / VS Code attach.
 
 It enables the Node.js inspector (port 9229) inside a running CF container using `cf ssh` and `kill -USR1`, then forwards it locally (so you can attach with DevTools). It also supports Cloud Foundry SSO (`cf login --sso`) and multi-space “workspaces” (isolated CF targets via `CF_HOME`) so you can debug apps across different org/space targets concurrently.
 
@@ -229,13 +231,14 @@ The tool uses the `kill -USR1` approach to enable the Node.js inspector on an al
 
 1. **Prerequisites Check** - Verifies CF CLI and required tools
 2. **App Verification** - Checks app status and starts if needed
-3. **SSH Setup** - Enables SSH access for the application (if not already enabled)
-4. **Port Assignment** - Automatically assigns an available port (or uses specified port)
-5. **Process Detection** - Finds the Node.js process PID in the app container
-6. **Tunnel Creation** - Creates SSH tunnel forwarding local port → remote port 9229
-7. **Debug Enablement** - Enables debugging with `kill -USR1` (always uses port 9229 on remote)
-8. **DevTools Launch** - Fetches inspector URL and opens Chrome DevTools directly
-9. **Session Management** - Tracks and manages multiple debugging sessions
+3. **SSH Setup** - Enables SSH access (`cf enable-ssh`) and restarts the app if SSH was off, so the change actually takes effect
+4. **Connectivity Gate** - Confirms `cf ssh` to the container really works before tunneling
+5. **Port Assignment** - Automatically assigns an available local port (or uses the one you specify)
+6. **Tunnel Creation** - Opens an SSH tunnel forwarding `localhost:<port>` → remote `9229`
+7. **Inspector Enablement** - Signals the running process with remote `kill -USR1 $(pgrep node)` to turn on the Node.js inspector on port 9229 (no second process, no redeploy)
+8. **DevTools Launch** - Opens `chrome://inspect`, where the discovered target's **inspect** link attaches Chrome DevTools (Chrome blocks navigating to `devtools://` URLs directly)
+9. **Tunnel Held Open** - The CLI stays running to keep the SSH tunnel alive; press `Ctrl+C` to stop and clean up
+10. **Session Management** - Tracks and manages multiple debugging sessions
 
 ## 🔍 Status Monitoring
 
@@ -364,6 +367,26 @@ src/
 └── types/
     └── index.ts              # TypeScript types
 ```
+
+## ❓ FAQ
+
+**How do I remote debug a SAP CAP (Node.js) app running on SAP BTP Cloud Foundry?**
+Run `npx sap-cap-debugger <app-name>`. The tool enables `cf ssh`, opens an SSH tunnel to the container, turns on the Node.js inspector on port `9229`, and opens `chrome://inspect` so you can attach Chrome DevTools or VS Code — without redeploying or changing your code.
+
+**How do I attach Chrome DevTools to a Node.js process on Cloud Foundry?**
+Once the tunnel is up, the tool opens `chrome://inspect`; click the **inspect** link next to the discovered `localhost:9229` target. (Chrome intentionally blocks opening `devtools://` URLs directly, so `chrome://inspect` is the supported one-click launcher.)
+
+**Do I need to redeploy or modify my CAP app to debug it?**
+No. The inspector is enabled on the already-running process with `kill -USR1 $(pgrep node)` — no `--inspect` flag, no second process, no redeploy.
+
+**Does this work with `cds debug` and CAP v8+?**
+Yes. It works with CAP v7, v8, and later. CAP v8+ ships a built-in `cds debug`, but this tool adds multi-app debugging, automatic port assignment, multi-space/SSO workspaces, and direct Chrome DevTools / VS Code attach.
+
+**Can I debug apps in multiple Cloud Foundry spaces or subaccounts at the same time?**
+Yes — use [workspaces](#-workspaces-multiple-cf-spacessubaccounts). Each workspace is an isolated CF login (`CF_HOME`), so you can debug across different org/space/subaccount targets concurrently, each on its own local port.
+
+**What are the requirements?**
+Node.js 14+, the Cloud Foundry CLI, SSH enabled for your space, and a SAP CAP app deployed on Cloud Foundry. See [Prerequisites](#-prerequisites).
 
 ## 🤝 Contributing
 

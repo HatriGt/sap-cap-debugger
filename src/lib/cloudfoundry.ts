@@ -158,59 +158,37 @@ export class CloudFoundryClient {
   }
 
   async checkSSHEnabled(appName: string): Promise<boolean> {
-    this.logger.loading(`Checking SSH access for application: ${appName}...`);
-    
-    const result = await this.cf(['ssh-enabled', appName]);
-    
-    if (result.success) {
-      const output = result.output.toLowerCase().trim();
-      
-      // More flexible pattern matching - check for "enabled" or "true" (not just "ssh is enabled")
-      // Common formats:
-      // - "ssh is enabled"
-      // - "ssh enabled"
-      // - "ssh support is enabled for app '...'."
-      // - "enabled"
-      // - "true" (some CF versions)
-      if (output.includes('enabled') || output.includes('true')) {
-        // Make sure it's not explicitly disabled
-        if (!output.includes('disabled') && !output.includes('false')) {
-          this.logger.stopLoading();
-          this.logger.success('SSH access is already enabled');
-          return true;
-        }
-      }
-      
-      // Explicitly disabled
-      if (output.includes('disabled') || output.includes('false')) {
-        this.logger.stopLoading();
-        this.logger.info('SSH access is disabled');
-        return false;
-      }
-      
-      // Log the actual output for debugging
-      this.logger.debug(`SSH status output: ${result.output}`);
-    }
-    
-    // If we can't determine status, try a direct SSH test
-    this.logger.update('Testing SSH connection...');
+    // The ONLY reliable check is whether `cf ssh` actually works. The app-level
+    // `cf ssh-enabled` flag can report "enabled" while `cf ssh` is still
+    // unauthorized ("You are not authorized to perform the requested action") -
+    // e.g. the app hasn't been restarted since enabling, or SSH is blocked at
+    // the space level. Relying on the flag caused us to skip `cf enable-ssh`
+    // and then fail later on the real cf ssh calls, so we test for real here.
+    this.logger.loading(`Verifying SSH access for ${appName}...`);
+
+    const marker = '__cds_ssh_ok__';
     const sshTest = await this.cf([
       // -T: disable pseudo-tty allocation (more reliable in non-interactive execution)
-      'ssh', '-T', appName, '-c', 'echo "test"'
+      'ssh', '-T', appName, '-c', `echo ${marker}`
     ], {
       // First SSH attempt can be slow due to key exchange / initial handshake.
-      timeout: 15000
+      timeout: 20000
     });
-    
-    if (sshTest.success) {
-      this.logger.stopLoading();
-      this.logger.success('SSH access is working (verified by test)');
+
+    this.logger.stopLoading();
+
+    if (sshTest.success && sshTest.output.includes(marker)) {
+      this.logger.success('SSH access is working (verified)');
       return true;
     }
-    
-    // If we can't determine status, assume it's disabled
-    this.logger.stopLoading();
-    this.logger.warning('Could not determine SSH status, assuming disabled');
+
+    // Not working - surface why (commonly "not authorized" == SSH not enabled
+    // for the app, or not yet effective until a restart).
+    const detail = (sshTest.output || sshTest.error || '').trim();
+    this.logger.info('SSH access is not available yet');
+    if (detail) {
+      this.logger.debug(`cf ssh test output: ${detail}`);
+    }
     return false;
   }
 

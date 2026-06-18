@@ -159,36 +159,48 @@ export class CloudFoundryClient {
 
   async checkSSHEnabled(appName: string): Promise<boolean> {
     // The ONLY reliable check is whether `cf ssh` actually works. The app-level
-    // `cf ssh-enabled` flag can report "enabled" while `cf ssh` is still
-    // unauthorized ("You are not authorized to perform the requested action") -
-    // e.g. the app hasn't been restarted since enabling, or SSH is blocked at
-    // the space level. Relying on the flag caused us to skip `cf enable-ssh`
-    // and then fail later on the real cf ssh calls, so we test for real here.
-    this.logger.loading(`Verifying SSH access for ${appName}...`);
-
+    // `cf ssh-enabled` flag can report "enabled" while `cf ssh` still fails -
+    // e.g. the app hasn't been restarted since enabling, SSH is blocked at the
+    // space level, or the first connection after a restart is just slow.
+    // We test for real, retry a few times (first/post-restart ssh can be slow),
+    // and surface the actual failure so it isn't hidden behind --verbose.
     const marker = '__cds_ssh_ok__';
-    const sshTest = await this.cf([
-      // -T: disable pseudo-tty allocation (more reliable in non-interactive execution)
-      'ssh', '-T', appName, '-c', `echo ${marker}`
-    ], {
-      // First SSH attempt can be slow due to key exchange / initial handshake.
-      timeout: 20000
-    });
+    const maxAttempts = 3;
+    let lastDetail = '';
 
-    this.logger.stopLoading();
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      this.logger.loading(`Verifying SSH access for ${appName}... (attempt ${attempt}/${maxAttempts})`);
 
-    if (sshTest.success && sshTest.output.includes(marker)) {
-      this.logger.success('SSH access is working (verified)');
-      return true;
+      // Match the working manual command's invocation as closely as possible:
+      // `cf ssh <app> -c '<cmd>'` (no -T). A pseudo-tty isn't requested because
+      // there's no local TTY, but we don't pass -T either, mirroring the manual
+      // command that is known to work for this user.
+      const sshTest = await this.cf(['ssh', appName, '-c', `echo ${marker}`], {
+        // First SSH attempt can be slow (UAA one-time-code + handshake), and
+        // even slower right after a restart.
+        timeout: 60000
+      });
+
+      this.logger.stopLoading();
+
+      if (sshTest.success && sshTest.output.includes(marker)) {
+        this.logger.success('SSH access is working (verified)');
+        return true;
+      }
+
+      lastDetail = (sshTest.output || sshTest.error || '').trim();
+      if (lastDetail) {
+        // Surface the real reason (e.g. "not authorized", timeout, host key)
+        // at warning level so the user can see it without --verbose.
+        this.logger.warning(`cf ssh test failed: ${lastDetail.split('\n').slice(0, 3).join(' | ')}`);
+      }
+
+      if (attempt < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 4000));
+      }
     }
 
-    // Not working - surface why (commonly "not authorized" == SSH not enabled
-    // for the app, or not yet effective until a restart).
-    const detail = (sshTest.output || sshTest.error || '').trim();
     this.logger.info('SSH access is not available yet');
-    if (detail) {
-      this.logger.debug(`cf ssh test output: ${detail}`);
-    }
     return false;
   }
 

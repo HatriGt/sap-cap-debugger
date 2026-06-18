@@ -1,5 +1,5 @@
 import { CommandExecutor } from '../utils/command';
-import { AppStatus, ProcessInfo, CommandResult } from '../types';
+import { AppStatus, CommandResult } from '../types';
 import { Logger } from '../types';
 
 export class AuthExpiredError extends Error {
@@ -215,56 +215,6 @@ export class CloudFoundryClient {
       }
     }
     return false;
-  }
-
-  async findNodeProcess(appName: string): Promise<ProcessInfo | null> {
-    // Best-effort detection only (the caller proceeds even if this returns null,
-    // since signalling uses remote `pgrep`), so keep the wait short.
-    const maxAttempts = 6;
-    let attempt = 1;
-
-    while (attempt <= maxAttempts) {
-      this.logger.loading(`Finding Node.js process... (attempt ${attempt}/${maxAttempts})`);
-
-      // Use `pgrep`, the same primitive as the proven manual command
-      // (`kill -USR1 $(pgrep node)`). pgrep is reliably available in the CF
-      // Diego container, whereas `ps aux` may be missing or produce output that
-      // doesn't match strict column parsing - which caused "Could not find
-      // Node.js process" even though `pgrep node` worked manually.
-      // `pgrep -l node` prints "<pid> <name>"; we fall back to bare `pgrep node`
-      // (just "<pid>") if -l isn't supported.
-      const result = await this.cf(['ssh', '-T', appName, '-c', 'pgrep -l node || pgrep node']);
-
-      if (result.success && result.output.trim()) {
-        // Output may also contain SSH/connection noise on stderr; only lines that
-        // start with a PID are real matches.
-        const lines = result.output.trim().split('\n').map(l => l.trim()).filter(Boolean);
-
-        for (const line of lines) {
-          const match = line.match(/^(\d+)(?:\s+(\S+))?/);
-          if (match) {
-            const pid = parseInt(match[1], 10);
-            if (!isNaN(pid)) {
-              this.logger.stopLoading();
-              this.logger.success(`Found Node.js process with PID: ${pid}`);
-              return {
-                pid,
-                name: match[2] || 'node',
-                command: line
-              };
-            }
-          }
-        }
-      }
-
-      this.logger.stopLoading();
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      attempt++;
-    }
-
-    this.logger.stopLoading();
-    this.logger.error('Could not find Node.js process after maximum attempts');
-    return null;
   }
 
   async enableDebugging(appName: string, pid: number, debugPort?: number): Promise<boolean> {

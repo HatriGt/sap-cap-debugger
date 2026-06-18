@@ -137,19 +137,13 @@ export class CAPDebugger {
         }
       }
 
-      // Start the application process
-      // Note: The app is already running, but we call this to ensure the process is active
-      const appResult = await this.cfClient.startAppProcess(config.appName);
-      
-      if (!appResult.success) {
-        this.logger.error('Failed to start application process');
-        return false;
-      }
-
-      // Wait for the app to start
-      this.logger.loading('Waiting for application to start...');
-      await new Promise(resolve => setTimeout(resolve, 8000));
-      this.logger.stopLoading();
+      // The application is already running (verified above). We intentionally do NOT
+      // spawn a new Node.js process here. Doing so used to cause two problems:
+      //   1. Entry-point detection ("server.js") could fail -> "entry point not found".
+      //   2. A second/duplicate process meant `kill -USR1` could land on the wrong PID,
+      //      so DevTools attached to a tunnel with no live inspector behind it -> "disconnected".
+      // Instead we mirror the proven manual flow: find the already-running process and
+      // signal it directly (kill -USR1), then tunnel to its inspector on 9229.
 
       // Find Node.js process
       this.logger.loading(`Finding Node.js process for ${config.appName}...`);

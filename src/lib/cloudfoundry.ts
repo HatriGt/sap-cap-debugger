@@ -215,26 +215,36 @@ export class CloudFoundryClient {
   }
 
   async findNodeProcess(appName: string): Promise<ProcessInfo | null> {
-    const maxAttempts = 10;
+    const maxAttempts = 15;
     let attempt = 1;
 
     while (attempt <= maxAttempts) {
       this.logger.loading(`Finding Node.js process... (attempt ${attempt}/${maxAttempts})`);
-      const result = await this.cf(['ssh', appName, '-c', 'ps aux | grep node | grep -v grep']);
-      
+
+      // Use `pgrep`, the same primitive as the proven manual command
+      // (`kill -USR1 $(pgrep node)`). pgrep is reliably available in the CF
+      // Diego container, whereas `ps aux` may be missing or produce output that
+      // doesn't match strict column parsing - which caused "Could not find
+      // Node.js process" even though `pgrep node` worked manually.
+      // `pgrep -l node` prints "<pid> <name>"; we fall back to bare `pgrep node`
+      // (just "<pid>") if -l isn't supported.
+      const result = await this.cf(['ssh', '-T', appName, '-c', 'pgrep -l node || pgrep node']);
+
       if (result.success && result.output.trim()) {
-        const lines = result.output.trim().split('\n');
-        
+        // Output may also contain SSH/connection noise on stderr; only lines that
+        // start with a PID are real matches.
+        const lines = result.output.trim().split('\n').map(l => l.trim()).filter(Boolean);
+
         for (const line of lines) {
-          const parts = line.trim().split(/\s+/);
-          if (parts.length >= 11 && parts[10] && parts[10].includes('node')) {
-            const pid = parseInt(parts[1]);
+          const match = line.match(/^(\d+)(?:\s+(\S+))?/);
+          if (match) {
+            const pid = parseInt(match[1], 10);
             if (!isNaN(pid)) {
               this.logger.stopLoading();
               this.logger.success(`Found Node.js process with PID: ${pid}`);
               return {
                 pid,
-                name: parts[10],
+                name: match[2] || 'node',
                 command: line
               };
             }

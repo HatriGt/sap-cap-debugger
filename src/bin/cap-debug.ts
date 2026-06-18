@@ -160,7 +160,21 @@ For more information, visit: https://github.com/HatriGt/sap-cap-debugger
     };
 
     const success = await capDebugger.setupDebugging(config);
-    process.exit(success ? 0 : 1);
+    if (!success) {
+      process.exit(1);
+    }
+
+    // IMPORTANT: do NOT exit on success. The SSH tunnel runs as a child process
+    // of this CLI; if we exit, the tunnel dies and DevTools immediately shows
+    // "WebSocket disconnected". Stay alive (like a foreground `cf ssh -N -L`)
+    // so the tunnel keeps serving until the user presses Ctrl+C (handled by the
+    // SIGINT handler below, which reminds them to run cleanup).
+    console.log('');
+    console.log('🔌 Tunnel is open. Press Ctrl+C here to stop debugging (then run cleanup).');
+    // Explicitly keep the event loop alive (a pending promise alone would not),
+    // so the child SSH tunnel keeps running until the user presses Ctrl+C.
+    setInterval(() => { /* hold the process open */ }, 1 << 30);
+    await new Promise<void>(() => { /* never resolves */ });
   });
 
 // Workspace management

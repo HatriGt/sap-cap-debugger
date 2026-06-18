@@ -56,12 +56,15 @@ export class CAPDebugger {
       }
 
       // STEP 1: check the SSH flag (cf ssh-enabled).
-      // STEP 2: if not enabled, run cf enable-ssh. (The restart in STEP 4 is what
-      // actually makes it take effect, so we don't wait here.)
+      // STEP 2: if not enabled, run cf enable-ssh. Enabling SSH only takes effect
+      // on instances started afterwards, so a freshly-enabled app MUST be
+      // restarted (tracked via justEnabled) before cf ssh will work.
       const sshFlagEnabled = await this.cfClient.checkSSHEnabled(config.appName);
+      let justEnabled = false;
       if (!sshFlagEnabled) {
         this.logger.info(`SSH is not enabled. Running 'cf enable-ssh ${config.appName}'...`);
         await this.cfClient.enableSSH(config.appName);
+        justEnabled = true;
       } else {
         this.logger.success(`SSH is enabled for '${config.appName}'`);
       }
@@ -83,18 +86,30 @@ export class CAPDebugger {
         this.logger.success(`Application '${config.appName}' is running`);
       }
 
-      // STEP 4: confirm cf ssh actually works. If it doesn't, the app must be
-      // restarted for SSH enablement to take effect on the already-running
-      // instances - this is the step that was missing. We restart (cf restart,
-      // a real stop+start) and re-test, exactly like doing it by hand.
+      // STEP 4: make cf ssh work.
+      // If we just enabled SSH, the running instances predate it and must be
+      // cycled - restart right away (no point testing first, it will fail).
+      let restarted = false;
+      if (justEnabled) {
+        this.logger.info('SSH was just enabled - restarting the app so it takes effect...');
+        if (!await this.cfClient.restartApp(config.appName)) {
+          this.logger.error(`Failed to restart '${config.appName}'.`);
+          return false;
+        }
+        restarted = true;
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
+
+      // Confirm cf ssh works. If it still fails and we haven't restarted yet
+      // (flag was already enabled but instances are stale), restart once and
+      // re-test - exactly like doing it by hand.
       let sshWorks = await this.cfClient.testSSHConnection(config.appName);
-      if (!sshWorks) {
+      if (!sshWorks && !restarted) {
         this.logger.warning('cf ssh is not authorized yet - restarting the app so SSH takes effect...');
         if (!await this.cfClient.restartApp(config.appName)) {
           this.logger.error(`Failed to restart '${config.appName}'.`);
           return false;
         }
-        // Give the SSH proxy a moment after the restart, then re-test.
         await new Promise(resolve => setTimeout(resolve, 5000));
         sshWorks = await this.cfClient.testSSHConnection(config.appName);
       }

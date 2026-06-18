@@ -215,7 +215,9 @@ export class CloudFoundryClient {
   }
 
   async findNodeProcess(appName: string): Promise<ProcessInfo | null> {
-    const maxAttempts = 15;
+    // Best-effort detection only (the caller proceeds even if this returns null,
+    // since signalling uses remote `pgrep`), so keep the wait short.
+    const maxAttempts = 6;
     let attempt = 1;
 
     while (attempt <= maxAttempts) {

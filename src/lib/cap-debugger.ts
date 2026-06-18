@@ -145,18 +145,23 @@ export class CAPDebugger {
       // Instead we mirror the proven manual flow: find the already-running process and
       // signal it directly (kill -USR1), then tunnel to its inspector on 9229.
 
-      // Find Node.js process
+      // Find Node.js process (best-effort, for display/session info only).
+      // This is NOT required to debug: the inspector is enabled remotely with
+      // `kill -USR1 $(pgrep node)` (pgrep runs inside the container), exactly
+      // like the proven manual command - which never parses a PID client-side.
+      // So if client-side detection/parsing fails we still proceed.
       this.logger.loading(`Finding Node.js process for ${config.appName}...`);
       const nodeProcess = await this.cfClient.findNodeProcess(config.appName);
       this.logger.stopLoading();
-      
-      if (!nodeProcess) {
-        this.logger.error(`Failed to find Node.js process for ${config.appName}. Cannot continue.`);
-        return false;
-      }
 
-      this.logger.info(`Found Node.js process: PID ${nodeProcess.pid} for ${config.appName}`);
-      this.logger.info(`Process command: ${nodeProcess.command.substring(0, 80)}...`);
+      const nodePid = nodeProcess?.pid ?? 0;
+      if (nodeProcess) {
+        this.logger.info(`Found Node.js process: PID ${nodeProcess.pid} for ${config.appName}`);
+        this.logger.info(`Process command: ${nodeProcess.command.substring(0, 80)}...`);
+      } else {
+        this.logger.warning(`Could not detect a specific Node.js PID for ${config.appName}; proceeding anyway.`);
+        this.logger.info(`Debugging will be enabled on all node processes via 'kill -USR1 $(pgrep node)'.`);
+      }
 
       // Create SSH tunnel - forward local port to remote inspector port
       // IMPORTANT: kill -USR1 always uses port 9229 on the remote side
@@ -180,17 +185,17 @@ export class CAPDebugger {
       }
 
       this.logger.success(`SSH tunnel created: localhost:${config.debugPort} -> ${config.appName}:${remoteInspectorPort}`);
-      this.logger.info(`This tunnel connects to ${config.appName}'s inspector (PID ${nodeProcess.pid})`);
+      this.logger.info(`This tunnel connects to ${config.appName}'s inspector on remote port ${remoteInspectorPort}`);
 
-      // Enable debugging on the specific process
+      // Enable debugging on the remote node process(es).
       // Note: kill -USR1 always enables inspector on port 9229 on the remote side
-      this.logger.info(`Enabling debugging on process ${nodeProcess.pid} for ${config.appName}...`);
-      if (!await this.cfClient.enableDebugging(config.appName, nodeProcess.pid, config.debugPort)) {
-        this.logger.error(`Failed to enable debugging on process ${nodeProcess.pid} for ${config.appName}`);
+      this.logger.info(`Enabling debugging for ${config.appName}...`);
+      if (!await this.cfClient.enableDebugging(config.appName, nodePid, config.debugPort)) {
+        this.logger.error(`Failed to enable debugging for ${config.appName}`);
         return false;
       }
-      
-      this.logger.success(`Debugging enabled on PID ${nodeProcess.pid} for ${config.appName} (port ${remoteInspectorPort})`);
+
+      this.logger.success(`Debugging enabled for ${config.appName} (remote port ${remoteInspectorPort})`);
 
       // Wait a moment for tunnel to fully establish
       await new Promise(resolve => setTimeout(resolve, 3000));
@@ -214,7 +219,7 @@ export class CAPDebugger {
       this.currentSession = {
         appName: config.appName,
         workspaceName: config.workspaceName,
-        nodePid: nodeProcess.pid,
+        nodePid: nodePid,
         sshTunnelPid: 0, // We don't track this in the current implementation
         appProcessPid: 0, // We don't track this in the current implementation
         debugPort: config.debugPort,

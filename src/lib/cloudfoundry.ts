@@ -70,11 +70,18 @@ export class CloudFoundryClient {
       return false;
     }
 
+    // Port checks use netstat first and fall back to lsof, so either one is enough.
+    // Don't hard-fail when netstat is missing (it's not installed by default on many
+    // modern systems) as long as lsof is available.
     const netstatExists = await this.commandExecutor.checkCommandExists('netstat');
-    if (!netstatExists) {
+    const lsofExists = await this.commandExecutor.checkCommandExists('lsof');
+    if (!netstatExists && !lsofExists) {
       this.logger.stopLoading();
-      this.logger.error('netstat command is not available');
+      this.logger.error('Neither netstat nor lsof is available; one is required for port checks');
       return false;
+    }
+    if (!netstatExists) {
+      this.logger.debug('netstat not found; falling back to lsof for port checks');
     }
 
     this.logger.stopLoading();
@@ -246,40 +253,34 @@ export class CloudFoundryClient {
   }
 
   async enableDebugging(appName: string, pid: number, debugPort?: number): Promise<boolean> {
-    this.logger.loading(`Enabling debugging on process ${pid}...`);
-    
-    // Note: kill -USR1 always enables inspector on port 9229 on the remote side
-    // The debugPort parameter is the LOCAL port, not the remote port
-    // The SSH tunnel forwards local port -> remote port 9229
-    
-    // Check if inspector is already running on the remote side (always port 9229)
-    this.logger.update('Checking if inspector is already running...');
-    const checkResult = await this.cf([
-      'ssh', appName, '-c',
-      `netstat -an 2>/dev/null | grep 9229 || ss -an 2>/dev/null | grep 9229 || echo "not found"`
-    ]);
-    
-    if (checkResult.success && checkResult.output.includes('9229')) {
-      this.logger.stopLoading();
-      this.logger.success('Debugging already enabled on port 9229');
-      return true;
-    }
-    
-    // Use kill -USR1 to enable debugging (always uses port 9229 on remote side)
-    const result = await this.cf(['ssh', appName, '-c', `kill -USR1 ${pid}`]);
-    
+    this.logger.loading('Enabling debugging (kill -USR1) on Node.js process(es)...');
+    this.logger.debug(`Detected primary Node.js PID ${pid}; signalling all node processes via pgrep`);
+
+    // Mirror the proven manual command exactly:
+    //   cf ssh <app> -c 'kill -USR1 $(pgrep node)'
+    //
+    // We deliberately signal EVERY Node.js process via `pgrep node` rather than a
+    // single guessed PID. CAP containers commonly run more than one node process
+    // (a launcher/parent plus the actual server worker); signalling only one can
+    // miss the process that serves requests, so the inspector never opens on 9229
+    // and DevTools attaches to a tunnel with no live inspector behind it
+    // ("disconnected"). Sending USR1 to a process that is already inspecting is a
+    // harmless no-op, so signalling all of them is safe.
+    //
+    // kill -USR1 always enables the inspector on remote port 9229; the SSH tunnel
+    // forwards the local debugPort to that remote 9229.
+    const result = await this.cf(['ssh', appName, '-c', 'kill -USR1 $(pgrep node)']);
+
     if (result.success) {
       this.logger.stopLoading();
+      this.logger.success('Debugging enabled on Node.js process(es) (remote port 9229)');
       if (debugPort && debugPort !== 9229) {
-        this.logger.info(`Debugging enabled on remote port 9229`);
         this.logger.info(`SSH tunnel forwards local port ${debugPort} -> remote port 9229`);
-      } else {
-        this.logger.success(`Debugging enabled on process ${pid} (port 9229)`);
       }
       return true;
     } else {
       this.logger.stopLoading();
-      this.logger.error('Failed to enable debugging');
+      this.logger.error(`Failed to enable debugging: ${result.error || result.output || 'unknown error'}`);
       return false;
     }
   }

@@ -66,86 +66,72 @@ export class DebuggerLauncher {
     return withoutQuery || null;
   }
 
+  // Append a unique param so Chrome opens a FRESH DevTools tab each run instead
+  // of refocusing a stale, disconnected tab from a previous run (those share the
+  // same ws UUID and just show "WebSocket disconnected").
+  private withCacheBuster(url: string): string {
+    const sep = url.includes('?') ? '&' : '?';
+    return `${url}${sep}cdsdebug=${Date.now()}`;
+  }
+
   async launchChromeDebugger(port: number): Promise<void> {
     this.logger.step('Opening Chrome Debugger');
-    
+
     // Wait a moment for the debugger to be ready
     await new Promise(resolve => setTimeout(resolve, 3000));
-    
+
     try {
       // Try to fetch the devtoolsFrontendUrl from the inspector JSON endpoint
       this.logger.loading('Fetching inspector URL...');
       const inspectorUrl = await this.fetchInspectorUrl(port);
       this.logger.stopLoading();
-      
+
       if (inspectorUrl) {
-        // Node's devtoolsFrontendUrl can be a devtools:// URL. Some Chrome versions refuse
-        // direct navigation to devtools:// with query params (ERR_INVALID_URL). A common
-        // workaround is to open the base devtools page first (no params), then open the
-        // full URL.
+        // Reaching here means we fetched /json over the tunnel successfully, so
+        // the tunnel + inspector ARE working. Open a fresh, unique URL so Chrome
+        // doesn't refocus a stale disconnected tab.
         this.logger.info(`Opening DevTools for port ${port}...`);
         this.logger.debug(`Inspector URL: ${inspectorUrl}`);
-        
+
+        const freshUrl = this.withCacheBuster(inspectorUrl);
+        const isDevtools = inspectorUrl.trim().startsWith('devtools://');
         const isMac = process.platform === 'darwin';
-        const devtoolsBaseUrl = this.getDevtoolsBaseUrl(inspectorUrl);
-        
-        if (isMac) {
-          try {
-            if (devtoolsBaseUrl) {
-              this.logger.info('Trying direct DevTools open (two-step workaround)...');
-              await execAsync(`open -a "Google Chrome" "${devtoolsBaseUrl}"`);
-              await new Promise(resolve => setTimeout(resolve, 300));
-              await execAsync(`open -a "Google Chrome" "${inspectorUrl}"`);
-              this.logger.success('Chrome DevTools opened directly!');
-              console.log('');
-              this.logger.info('🎉 DevTools should now be open with your debugging session');
-              console.log('');
-              return;
-            }
 
-            // If inspectorUrl isn't devtools://, just open it directly.
-            await execAsync(`open -a "Google Chrome" "${inspectorUrl}"`);
-            this.logger.success('Chrome DevTools opened directly!');
-            console.log('');
-            this.logger.info('🎉 DevTools should now be open with your debugging session');
-            console.log('');
-            return;
-          } catch (error: any) {
-            this.logger.warning(`Could not open with Chrome app: ${error.message}`);
-            this.logger.warning('Falling back to inspector listing page...');
-          }
-        }
+        const announce = () => {
+          this.logger.success('Chrome DevTools opened');
+          console.log('');
+          this.logger.info('🎉 DevTools should now be connected to your debugging session');
+          this.logger.info('   If it ever shows "WebSocket disconnected": close old DevTools tabs and');
+          this.logger.info('   reopen the URL below (the tunnel stays open while this command runs):');
+          console.log(`   ${freshUrl}`);
+          console.log('');
+        };
 
-        // Non-macOS (or macOS fallback): attempt the same two-step workaround if devtools://
         try {
-          if (devtoolsBaseUrl) {
-            this.logger.info('Trying direct DevTools open (two-step workaround)...');
-            await open(devtoolsBaseUrl, { app: { name: 'google chrome' } });
-            await new Promise(resolve => setTimeout(resolve, 300));
-            await open(inspectorUrl, { app: { name: 'google chrome' } });
-            this.logger.success('Chrome DevTools opened directly!');
-            console.log('');
-            this.logger.info('🎉 DevTools should now be open with your debugging session');
-            console.log('');
-            return;
+          if (isMac) {
+            await execAsync(`open -a "Google Chrome" "${freshUrl}"`);
+          } else {
+            await open(freshUrl, { app: { name: 'google chrome' } });
           }
-
-          await open(inspectorUrl, { app: { name: 'google chrome' } });
-          this.logger.success('Chrome DevTools opened directly!');
-          console.log('');
-          this.logger.info('🎉 DevTools should now be open with your debugging session');
-          console.log('');
+          announce();
           return;
-        } catch (openError) {
-          this.logger.warning('Could not open DevTools URL directly.');
-          this.logger.warning('Falling back to inspector listing page...');
+        } catch (error: any) {
+          this.logger.warning(`Could not open Chrome directly: ${error?.message ?? error}`);
+          // Fall through to chrome://inspect / listing fallbacks below.
+          void isDevtools;
         }
 
-        // Last fallback: open the JSON listing page so user can click the link.
-        await open(`http://localhost:${port}/json`);
-        this.logger.info(`Opened http://localhost:${port}/json`);
-        this.logger.info('Please click on the "devtoolsFrontendUrl" link to open DevTools');
-        console.log('');
+        // Fallback: open the JSON listing page so the user can click the link.
+        try {
+          await open(`http://localhost:${port}/json`);
+          this.logger.info(`Opened http://localhost:${port}/json`);
+          this.logger.info('Click the "devtoolsFrontendUrl" link to open DevTools.');
+          console.log('');
+        } catch {
+          this.logger.info(`Open this URL in Chrome to start debugging:`);
+          console.log(`   ${freshUrl}`);
+          console.log('');
+        }
         return;
       }
       
